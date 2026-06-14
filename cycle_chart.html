@@ -1,0 +1,464 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>ValiantTMS — Cycle Chart</title>
+  <script id="sap-ui-bootstrap"
+    src="https://sdk.openui5.org/resources/sap-ui-core.js"
+    data-sap-ui-libs="sap.m,sap.ui.table"
+    data-sap-ui-theme="sap_horizon"
+    data-sap-ui-compatVersion="edge"
+    data-sap-ui-async="true">
+  </script>
+  <style>
+    html, body { height: 100%; margin: 0; padding: 0; }
+
+    /* Tighter row padding so 12 px bars have visible headroom */
+    .sapUiTableCell { padding: 0 !important; }
+    .sapUiTableCellInner { padding: 0 4px !important; }
+
+    /* Ruler header – allow content to overflow horizontally */
+    .sapUiTableColHdr .sapUiTableCellInner,
+    .sapUiTableColHdrCnt .sapUiTableCellInner {
+      overflow: visible !important;
+      padding: 0 !important;
+    }
+
+    /* Remove horizontal row separator lines */
+    .sapUiTableRow,
+    .sapUiTableRowAlternate { border-bottom: none !important; border-top: none !important; }
+    .sapUiTableCell,
+    .sapUiTableCellInner    { border-bottom: none !important; border-top: none !important; }
+  </style>
+</head>
+<body class="sapUiBody">
+  <div id="content" style="height:100%"></div>
+
+<script>
+sap.ui.getCore().attachInit(function () {
+  "use strict";
+
+  // ── State ─────────────────────────────────────────────────────────────────
+  var API_BASE    = "http://localhost:8000";  // FastAPI server base URL
+
+  var scaleFactor = 2.0;   // pixels per second
+  var maxCycleEnd = 500;   // updated after each API call
+  var bAutoExpand = false;
+
+  // Walk the sub_process_items tree to find the global maximum cycle_end
+  function getMaxCycleEnd(items) {
+    var max = 0;
+    (items || []).forEach(function (item) {
+      if ((item.cycle_end || 0) > max) max = item.cycle_end;
+      var childMax = getMaxCycleEnd(item.sub_process_items);
+      if (childMax > max) max = childMax;
+    });
+    return max;
+  }
+
+  // Annotate every item with its parent's and grandparent's cycle_end.
+  // These drive the right-border markers in CycleBar, mirroring the React pattern
+  // where nested divs each add a borderRight at the parent's cycle_end position.
+  function annotateAncestors(items, ancestorEnds) {
+    (items || []).forEach(function (item) {
+      item._ancestorEnds = ancestorEnds.join(",");
+      annotateAncestors(item.sub_process_items, [item.cycle_end].concat(ancestorEnds));
+    });
+  }
+
+  // ── Models ────────────────────────────────────────────────────────────────
+  var oSettingsModel = new sap.ui.model.json.JSONModel({ scaleFactor: scaleFactor });
+  var oDataModel     = new sap.ui.model.json.JSONModel({ items: [], maxCycleEnd: 0 });
+
+  // ── Custom CycleBar control ───────────────────────────────────────────────
+  //   Mirrors the React ProgressBar rules:
+  //     parent_item (Station / Process group) → transparent bg + dashed border
+  //     leaf (Undefined)                      → solid fill with DB color
+  //   Plus a vertical connector stub for all non-Station rows.
+  sap.ui.core.Control.extend("CycleBar", {
+    metadata: {
+      properties: {
+        cycleStart:      { type: "float",  defaultValue: 0 },
+        cycleTime:       { type: "float",  defaultValue: 0 },
+        color:           { type: "string", defaultValue: "#09528A" },
+        scaleFactor:     { type: "float",  defaultValue: 2 },
+        cycleType:       { type: "string", defaultValue: "Undefined" },
+        ancestorEnds:    { type: "string", defaultValue: "" }
+      }
+    },
+    renderer: function (oRm, oCtrl) {
+      var sf      = oCtrl.getScaleFactor() || 2;
+      var start   = oCtrl.getCycleStart()  || 0;
+      var time    = oCtrl.getCycleTime()   || 0;
+      var color   = oCtrl.getColor()       || "#09528A";
+      var ct      = oCtrl.getCycleType()   || "Undefined";
+      if (ct === "Station") { color = "brown"; }  // always brown, regardless of DB value
+      var spacerW = Math.ceil(start * sf);
+      var barW    = Math.max(2, Math.ceil(time * sf));
+      var tip     = "Start: "    + start.toFixed(2) + " s" +
+                    "  |  Cycle: " + time.toFixed(2)  + " s" +
+                    "  |  End: "   + (start + time).toFixed(2) + " s";
+
+      // Bar visual rules (matches React ProgressBar parent_item logic)
+      var barH, barBg, barBorder, barShadow;
+      if (ct === "Station") {
+        barH      = 16;
+        barBg     = "transparent";
+        barBorder = "3px dashed " + color;
+        barShadow = "none";
+      } else if (ct === "Process group") {
+        barH      = 14;
+        barBg     = "transparent";
+        barBorder = "2px dashed " + color;
+        barShadow = "none";
+      } else {                          // "Undefined" → solid leaf bar
+        barH      = 12;
+        barBg     = color;
+        barBorder = "none";
+        barShadow = "0 1px 2px rgba(0,0,0,.25)";
+      }
+
+      // Root container — explicit px height required (% resolves to 0 in table cells)
+      oRm.write('<div');
+      oRm.writeControlData(oCtrl);
+      oRm.addStyle("position",    "relative");
+      oRm.addStyle("width",       "100%");
+      oRm.addStyle("height",      "36px");
+      oRm.addStyle("display",     "flex");
+      oRm.addStyle("align-items", "center");
+      oRm.addStyle("overflow",    "visible");
+      oRm.writeStyles();
+      oRm.write('>');
+
+
+      // Transparent offset (spacer)
+      oRm.write('<div style="display:inline-block;flex-shrink:0;' +
+                'width:' + spacerW + 'px;height:' + barH + 'px;' +
+                'border-bottom:1px dashed lightgray;"></div>');
+
+      // Bar — solid for leaves, dashed outline for parents
+      oRm.write(
+        '<div title="' + tip + '" style="display:inline-block;flex-shrink:0;' +
+        'width:' + barW + 'px;height:' + barH + 'px;' +
+        'background:' + barBg + ';' +
+        (barBorder !== "none" ? 'border:' + barBorder + ';border-bottom:none;' : '') +
+        'border-radius:3px;box-sizing:border-box;' +
+        (barShadow !== "none" ? 'box-shadow:' + barShadow + ';' : '') +
+        '"></div>'
+      );
+
+      // One vertical line per ancestor, nearest first (parent, grandparent, great-grandparent …)
+      var ancestorEnds = oCtrl.getAncestorEnds();
+      if (ancestorEnds) {
+        ancestorEnds.split(",").forEach(function (endStr) {
+          var endVal = parseFloat(endStr);
+          if (endVal > 0) {
+            oRm.write('<div style="position:absolute;left:' + (Math.round(endVal * sf) + 3) + 'px;' +
+                      'top:0;height:36px;border-left:0.5px dashed lightgray;"></div>');
+          }
+        });
+      }
+
+      oRm.write('</div>');
+    }
+  });
+
+  // ── Custom TitleCell control ──────────────────────────────────────────────
+  //   Shows title with visual weight based on cycle_type.
+  sap.ui.core.Control.extend("TitleCell", {
+    metadata: {
+      properties: {
+        title:     { type: "string", defaultValue: "" },
+        cycleType: { type: "string", defaultValue: "Undefined" },
+        color:     { type: "string", defaultValue: "#32363a" }
+      }
+    },
+    renderer: function (oRm, oCtrl) {
+      var ct    = oCtrl.getCycleType() || "Undefined";
+      // Station always brown; Process group and leaf steps use the DB color field
+      var color = ct === "Station" ? "brown" : (oCtrl.getColor() || "#32363a");
+      var fw    = ct === "Station" ? "700" : ct === "Process group" ? "600" : "400";
+      var pl    = ct === "Station" ? "0"   : "4px";
+      var title = oCtrl.getTitle() || "";
+      oRm.write('<span');
+      oRm.writeControlData(oCtrl);
+      oRm.write(' style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis;' +
+                'display:block;line-height:36px;font-size:13px;' +
+                'color:' + color + ';font-weight:' + fw + ';padding-left:' + pl + ';"' +
+                ' title="' + title + '">');
+      oRm.writeEscaped(title);
+      oRm.write('</span>');
+    }
+  });
+
+  // ── Ruler HTML builder ────────────────────────────────────────────────────
+  //   Draws major tick every 10 s, minor tick every 1 s (when sf >= 3).
+  //   Matches PyQt6 MyRulerHeader: minor_step = 1×sf, major_step = 10×sf.
+  function buildRulerHtml(sf, maxEnd) {
+    var totalW    = Math.ceil(sf * maxEnd) + 50;
+    var showMinor = sf >= 3;
+    var lastSec   = Math.ceil(maxEnd) + 1;
+    var parts     = [
+      '<div style="position:relative;width:' + totalW + 'px;height:100%;' +
+      'background:#f0f0f0;border-bottom:2px solid #bbb;box-sizing:border-box;' +
+      'overflow:hidden;">'
+    ];
+
+    for (var t = 0; t <= lastSec; t++) {
+      var x = Math.round(t * sf);
+      if (t % 10 === 0) {
+        parts.push('<div style="position:absolute;left:' + x + 'px;top:0;bottom:0;' +
+                   'width:1px;background:#888;"></div>');
+        if (x < totalW - 2) {
+          parts.push('<span style="position:absolute;left:' + (x + 2) + 'px;top:3px;' +
+                     'font-size:9px;font-family:72,Arial,sans-serif;color:#444;' +
+                     'white-space:nowrap;">' + t + '</span>');
+        }
+      } else if (showMinor) {
+        parts.push('<div style="position:absolute;left:' + x + 'px;bottom:2px;' +
+                   'width:1px;height:5px;background:#bbb;"></div>');
+      }
+    }
+    parts.push('</div>');
+    return parts.join("");
+  }
+
+  // ── Ruler control (column header) ─────────────────────────────────────────
+  var oRulerHtml = new sap.ui.core.HTML({
+    content:         "<div></div>",
+    preferDOM:       false,
+    sanitizeContent: false
+  });
+
+  // ── Gantt column ──────────────────────────────────────────────────────────
+  var oGanttColumn = new sap.ui.table.Column({
+    label:     oRulerHtml,
+    template:  new CycleBar({
+                 cycleStart:     "{cycle_start}",
+                 cycleTime:      "{cycle_time}",
+                 color:          "{color}",
+                 scaleFactor:    "{settings>/scaleFactor}",
+                 cycleType:      "{cycle_type}",
+                 ancestorEnds:   "{_ancestorEnds}"
+               }),
+    width:     (Math.ceil(scaleFactor * maxCycleEnd) + 50) + "px",
+    resizable: false
+  });
+
+  // ── Tree table ────────────────────────────────────────────────────────────
+  var oTable = new sap.ui.table.TreeTable({
+    visibleRowCountMode: sap.ui.table.VisibleRowCountMode.Auto,
+    minAutoRowCount:     5,
+    selectionMode:       sap.ui.table.SelectionMode.None,
+    alternateRowColors:  true,
+    columnHeaderHeight:  32,
+    rowHeight:           36,
+    fixedColumnCount:    1,   // Only "Cycle Description" is fixed; Gantt + data columns scroll
+    columns: [
+      new sap.ui.table.Column({
+        label:     new sap.m.Label({ text: "Cycle Description" }),
+        template:  new TitleCell({ title: "{title}", cycleType: "{cycle_type}", color: "{color}" }),
+        width:     "220px",
+        resizable: true
+      }),
+      oGanttColumn,
+      new sap.ui.table.Column({
+        label:     new sap.m.Label({ text: "Cycle Start (s)" }),
+        template:  new sap.m.Text({
+                     text: { path: "cycle_start",
+                             formatter: function (v) { return v != null ? (+v).toFixed(2) : ""; } },
+                     wrapping: false, textAlign: "End"
+                   }),
+        width:     "90px",
+        hAlign:    "End",
+        resizable: true
+      }),
+      new sap.ui.table.Column({
+        label:     new sap.m.Label({ text: "Cycle Time (s)" }),
+        template:  new sap.m.Text({
+                     text: { path: "cycle_time",
+                             formatter: function (v) { return v != null ? (+v).toFixed(2) : ""; } },
+                     wrapping: false, textAlign: "End"
+                   }),
+        width:     "90px",
+        hAlign:    "End",
+        resizable: true
+      }),
+      new sap.ui.table.Column({
+        label:     new sap.m.Label({ text: "Cycle End (s)" }),
+        template:  new sap.m.Text({
+                     text: { path: "cycle_end",
+                             formatter: function (v) { return v != null ? (+v).toFixed(2) : ""; } },
+                     wrapping: false, textAlign: "End"
+                   }),
+        width:     "90px",
+        hAlign:    "End",
+        resizable: true
+      })
+    ]
+  });
+
+  oTable.setModel(oDataModel);
+  oTable.setModel(oSettingsModel, "settings");
+  oTable.bindRows({ path: "/items", parameters: { arrayNames: ["sub_process_items"] } });
+
+  // Auto-expand to level 2 after each data load
+  oTable.attachRowsUpdated(function () {
+    if (bAutoExpand) {
+      bAutoExpand = false;
+      oTable.expandToLevel(2);
+    }
+  });
+
+  // ── Column / ruler update helpers ─────────────────────────────────────────
+  function updateGanttColumn() {
+    oGanttColumn.setWidth((Math.ceil(scaleFactor * maxCycleEnd) + 50) + "px");
+  }
+
+  function updateRuler() {
+    oRulerHtml.setContent(buildRulerHtml(scaleFactor, maxCycleEnd));
+  }
+
+  // ── API calls ─────────────────────────────────────────────────────────────
+  function loadTree(opNumber) {
+    bAutoExpand = true;
+    fetch(API_BASE + "/updateTree", {
+      method:  "POST",
+      headers: { "Content-Type": "application/json" },
+      body:    JSON.stringify({ op_number: opNumber })
+    })
+      .then(function (r) {
+        if (!r.ok) throw new Error("HTTP " + r.status);
+        return r.json();
+      })
+      .then(function (response) {
+        var items = response.data || [];
+        annotateAncestors(items, []);
+        maxCycleEnd = getMaxCycleEnd(items) || 500;
+        oDataModel.setData({ items: items, maxCycleEnd: maxCycleEnd });
+        updateGanttColumn();
+        updateRuler();
+      })
+      .catch(function (err) {
+        sap.m.MessageToast.show("Error loading op data: " + err.message);
+      });
+  }
+
+  function loadOpNumbers() {
+    fetch(API_BASE + "/updateOpNumbers", { method: "POST" })
+      .then(function (r) {
+        if (!r.ok) throw new Error("HTTP " + r.status);
+        return r.json();
+      })
+      .then(function (response) {
+        var ops = response.data || [];
+        ops.forEach(function (op) {
+          oOpSelect.addItem(new sap.ui.core.Item({ key: op, text: op }));
+        });
+        if (ops.length > 0) {
+          oOpSelect.setSelectedKey(ops[0]);
+          loadTree(ops[0]);
+        }
+      })
+      .catch(function () {
+        sap.m.MessageToast.show(
+          "Cannot reach server. Make sure FastAPI is running (uvicorn main:app --reload)."
+        );
+      });
+  }
+
+  // ── Scale slider ──────────────────────────────────────────────────────────
+  var oScaleLabel = new sap.m.Label({ text: scaleFactor.toFixed(1) + " px/s", width: "50px" });
+
+  var oSlider = new sap.m.Slider({
+    min:   0.5,
+    max:   12,
+    step:  0.5,
+    value: scaleFactor,
+    width: "180px",
+    liveChange: function (oEvent) {
+      scaleFactor = parseFloat(oEvent.getParameter("value"));
+      oSettingsModel.setProperty("/scaleFactor", scaleFactor);
+      oScaleLabel.setText(scaleFactor.toFixed(1) + " px/s");
+      updateGanttColumn();
+      updateRuler();
+    }
+  });
+
+  // ── Op number select ──────────────────────────────────────────────────────
+  var oOpSelect = new sap.m.Select({
+    change: function (oEvent) {
+      loadTree(oEvent.getParameter("selectedItem").getKey());
+    }
+  });
+
+  // ── Toolbar ───────────────────────────────────────────────────────────────
+  var oToolbar = new sap.m.Toolbar({
+    style: "Standard",
+    content: [
+      new sap.m.Label({ text: "Operation:" }),
+      new sap.m.ToolbarSpacer({ width: "6px" }),
+      oOpSelect,
+      new sap.m.ToolbarSeparator(),
+      new sap.m.Label({ text: "Scale:" }),
+      new sap.m.ToolbarSpacer({ width: "6px" }),
+      oSlider,
+      new sap.m.ToolbarSpacer({ width: "6px" }),
+      oScaleLabel,
+      new sap.m.ToolbarSpacer(),
+      new sap.m.Button({
+        icon:    "sap-icon://expand-all",
+        type:    "Transparent",
+        tooltip: "Expand All",
+        press:   function () { oTable.expandToLevel(5); }
+      }),
+      new sap.m.Button({
+        icon:    "sap-icon://collapse-all",
+        type:    "Transparent",
+        tooltip: "Collapse All",
+        press:   function () { oTable.collapseAll(); }
+      })
+    ]
+  });
+
+  // ── Legend (footer) ───────────────────────────────────────────────────────
+  function legendItem(color, label) {
+    return new sap.ui.core.HTML({
+      content: '<div style="display:inline-flex;align-items:center;margin-right:16px;' +
+               'font-size:11px;font-family:72,Arial,sans-serif;color:#555;">' +
+               '<span style="display:inline-block;width:22px;height:10px;background:' + color + ';' +
+               'border-radius:2px;margin-right:5px;"></span>' + label + '</div>',
+      sanitizeContent: false
+    });
+  }
+
+  var oLegend = new sap.m.Toolbar({
+    style: "Clear",
+    content: [
+      new sap.m.ToolbarSpacer(),
+      legendItem("#09528A", "Station"),
+      legendItem("#1A7FC4", "Process group"),
+      legendItem("#4BA9E0", "Step (Undefined)"),
+      new sap.m.ToolbarSpacer()
+    ]
+  });
+
+  // ── Page / App ────────────────────────────────────────────────────────────
+  var oPage = new sap.m.Page({
+    title:         "ValiantTMS — Cycle Chart",
+    showNavButton: false,
+    subHeader:     oToolbar,
+    content:       [oTable],
+    footer:        oLegend
+  });
+
+  new sap.m.App({ pages: [oPage] }).placeAt("content");
+
+  // Initial ruler render, then load data
+  updateRuler();
+  loadOpNumbers();
+});
+</script>
+</body>
+</html>
