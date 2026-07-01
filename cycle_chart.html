@@ -95,7 +95,15 @@
     .vtPlotsTabBtn.vtPActive { background:#09528A; color:#fff; border-color:#09528A; }
     .vtStTabBtn { cursor:pointer; padding:3px 10px; border:1px solid #c8c8c8; border-radius:10px; font-size:0.78rem; color:#555; background:#f7f7f7; font-family:72,Arial,sans-serif; }
     .vtStTabBtn.vtPActive { background:#09528A; color:#fff; border-color:#09528A; }
-    .vtPlotCard { background:#fff; border:1px solid #e4e4e4; border-radius:6px; margin:6px 0; padding:10px 14px; }
+    .vtBarDim { opacity: 0.3; transition: opacity 0.15s; }
+    .vtMiniPieWrap { display:flex; flex-direction:column; align-items:center; justify-content:center; gap:2px; padding:4px 10px; height:100%; }
+    .vtMiniPieInfo { font-size:0.72rem; font-family:72,Arial,sans-serif; color:#32363a; text-align:center; line-height:1.4; }
+    .vtPlotsGrid { display:flex; flex-wrap:wrap; gap:8px; padding:8px; align-content:flex-start; }
+    .vtPlotCard { background:#fff; border:1px solid #e4e4e4; border-radius:6px; padding:10px 12px; min-width:0; }
+    .vtCardSm   { flex:0 0 210px; }
+    .vtCardMd   { flex:1 1 270px; }
+    .vtCardLg   { flex:2 1 360px; }
+    .vtCardFull { flex:1 1 100%; }
     .vtPlotTitle { font-size:0.8rem; font-weight:600; color:#32363a; margin-bottom:6px; text-align:center; font-family:72,Arial,sans-serif; }
 
   </style>
@@ -232,6 +240,38 @@ sap.ui.getCore().attachInit(function () {
       buildFlatMap(item.sub_process_items, map);
     });
     return map;
+  }
+
+  // ── Dependant-items helpers (mirrors add/delete_from_dependant_list) ──────
+  function _getDepMap(item) {
+    try { return JSON.parse(item.dependant_items || '{}'); } catch (e) { return {}; }
+  }
+  function _setDepMap(item, dep) {
+    item.dependant_items = JSON.stringify(dep);
+  }
+  // For each valueId in valueIds, add itemId into valueId's dependant_items[phase]
+  function _addToDependantList(flatMap, valueIds, itemId, phase) {
+    (valueIds || []).forEach(function (valueId) {
+      var target = flatMap[valueId];
+      if (!target) return;
+      var dep = _getDepMap(target);
+      if (!Array.isArray(dep[phase])) dep[phase] = [];
+      if (dep[phase].indexOf(itemId) < 0) dep[phase].push(itemId);
+      _setDepMap(target, dep);
+    });
+  }
+  // For each valueId in valueIds, remove itemId from all phases of valueId's dependant_items
+  function _deleteFromDependantList(flatMap, valueIds, itemId) {
+    (valueIds || []).forEach(function (valueId) {
+      var target = flatMap[valueId];
+      if (!target) return;
+      var dep = _getDepMap(target);
+      Object.keys(dep).forEach(function (ph) {
+        dep[ph] = (dep[ph] || []).filter(function (id) { return id !== itemId; });
+        if (!dep[ph].length) delete dep[ph];
+      });
+      _setDepMap(target, dep);
+    });
   }
 
   // ── Rounding helper ────────────────────────────────────────────────────────
@@ -465,6 +505,9 @@ sap.ui.getCore().attachInit(function () {
     updateGanttColumn();
     updateRuler();
     oDataModel.refresh(true);
+    _updateMiniPie();
+    _updateResourceUsageInCache(oOpSelect.getSelectedKey());
+    setTimeout(function () { var cur = getCurrentItem(); if (cur) _showRcSigns(cur); }, 0);
   }
 
   // ── Sibling context helper ────────────────────────────────────────────────
@@ -536,7 +579,7 @@ sap.ui.getCore().attachInit(function () {
       parent_id:        item.parent_id,
       subprocess:       clonedChildren.map(function (c) { return c.item_id; }).join(','),
       run_cond_config:  item.run_cond_config,
-      dependant_items:  JSON.stringify({ Start: [], Cycle: [], End: [] }),
+      dependant_items:  '{}',
       cycle_start:      item.cycle_start,
       cycle_time:       item.cycle_time,
       cycle_end:        item.cycle_end,
@@ -665,6 +708,7 @@ sap.ui.getCore().attachInit(function () {
     oRcState.activeItemIds = [];
     oActivePhases = ['start', 'cycle'];
     cancelRcWait();
+    _clearRcSigns();
     applyRowHighlight();
     oRcStartSelect.setSelectedKey('');   oRcStartValueRow.setVisible(false);
     oRcCycleSelect.setSelectedKey('');   oRcCycleValueInput.setEnabled(false);
@@ -747,6 +791,7 @@ sap.ui.getCore().attachInit(function () {
     }
 
     applyRowHighlight();
+    _showRcSigns(oObj);
     console.log("[ValiantTMS] active items:", oRcState.activeItemIds);
     console.log("[ValiantTMS] item data:", JSON.stringify(oObj, null, 2));
     console.log("[ValiantTMS] RC JSON:", oObj.run_cond_config || '(none)');
@@ -772,15 +817,34 @@ sap.ui.getCore().attachInit(function () {
         var item = flatMap[id];
         if (!item) return;
         var rc = parseRC(item.run_cond_config);
+
+        // Remove old dependant_items entries for the phase being replaced
+        var oldPhase = rc[phase];
+        if (oldPhase && oldPhase.values) {
+          _deleteFromDependantList(flatMap, oldPhase.values, id);
+        }
+
+        // Clear (and clean up) the third phase when only 2 phases are active
+        if (oActivePhases.length === 2) {
+          ['start', 'cycle', 'end'].forEach(function (p) {
+            if (!oActivePhases.includes(p)) {
+              var old = rc[p];
+              if (old && old.values) _deleteFromDependantList(flatMap, old.values, id);
+              rc[p] = null;
+            }
+          });
+        }
+
+        // Apply new RC phase
         rc[phase] = condition
           ? { condition: condition, values: values || [], offset: (offset !== undefined ? parseFloat(offset) : 0.0) }
           : null;
-        if (oActivePhases.length === 2) {
-          ['start', 'cycle', 'end'].forEach(function (p) {
-            if (!oActivePhases.includes(p)) rc[p] = null;
-          });
-        }
         item.run_cond_config = serializeRC(rc);
+
+        // Add new dependant_items entries for the newly referenced items
+        if (condition && values && values.length) {
+          _addToDependantList(flatMap, values, id, phase);
+        }
       });
       recalcTree();
       var updated = getCurrentItem();
@@ -1226,7 +1290,7 @@ sap.ui.getCore().attachInit(function () {
         parent_id:        "",
         subprocess:       "",
         run_cond_config:  JSON.stringify({ Cycle: { "Custom value": [10] } }),
-        dependant_items:  JSON.stringify({ Start: [], Cycle: [], End: [] }),
+        dependant_items:  '{}',
         cycle_start:      0,
         cycle_time:       0,
         cycle_end:        0,
@@ -1263,7 +1327,7 @@ sap.ui.getCore().attachInit(function () {
       parent_id:        currItem.item_id,
       subprocess:       "",
       run_cond_config:  JSON.stringify({ Cycle: { "Custom value": [10] } }),
-      dependant_items:  JSON.stringify({ Start: [], Cycle: [], End: [] }),
+      dependant_items:  '{}',
       cycle_start:      0,
       cycle_time:       0,
       cycle_end:        0,
@@ -1307,7 +1371,7 @@ sap.ui.getCore().attachInit(function () {
       parent_id:        selectedItem.parent_id || "",
       subprocess:       "",
       run_cond_config:  JSON.stringify({ Cycle: { "Custom value": [10] } }),
-      dependant_items:  JSON.stringify({ Start: [], Cycle: [], End: [] }),
+      dependant_items:  '{}',
       cycle_start:      0,
       cycle_time:       0,
       cycle_end:        0,
@@ -1385,7 +1449,6 @@ sap.ui.getCore().attachInit(function () {
     return (items || []).map(function (item) {
       var clean = Object.assign({}, item);
       delete clean._ancestorEnds;
-      delete clean.step;
       clean.sub_process_items = stripClientFields(item.sub_process_items);
       return clean;
     });
@@ -1403,10 +1466,10 @@ sap.ui.getCore().attachInit(function () {
       job_pictures:               null,
       station_list:               stationList,
       machine_cycle_time_summary: JSON.stringify(sums),
-      total_machine_cycle:        Math.round(sums.Machine  * 100) / 100,
-      total_manual_cycle:         Math.round(sums.Manual   * 100) / 100,
-      total_robot_cycle:          Math.round(sums.Robot    * 100) / 100,
-      total_operator_cycle:       Math.round(sums.Operator * 100) / 100,
+      total_machine_cycle:        Math.round(sums['Machine cycle']  * 100) / 100,
+      total_manual_cycle:         Math.round(sums['Manual cycle']   * 100) / 100,
+      total_robot_cycle:          Math.round(sums['Robot cycle']    * 100) / 100,
+      total_operator_cycle:       Math.round(sums['Operator wait']  * 100) / 100,
       used_cycle_time:            usedCycleTime,
       num_of_parts:               meta.num_of_parts   || 1
     };
@@ -1466,6 +1529,323 @@ sap.ui.getCore().attachInit(function () {
     sap.m.MessageToast.show("Saved");
   }
 
+  // ── Title autocomplete (mirrors PyQt6 SentenceCompletingLineEdit) ───────────
+  function _getResourceSuggestions() {
+    var all = [];
+    (_jobState.machine_list  || []).forEach(function (r) { if (r) all.push(r); });
+    (_jobState.robot_list    || []).forEach(function (r) { if (r) all.push(r); });
+    (_jobState.operator_list || []).forEach(function (r) { if (r) all.push(r); });
+    return all;
+  }
+
+  // ── Resource usage cache update (mirrors update_op_resource_usage_time_in_db) ─
+  var _CYCLE_TYPE_COLORS = {
+    'Machine cycle': '#05DF72',
+    'Robot cycle':   '#EBDD6C',
+    'Manual cycle':  '#EB1E29',
+    'Operator wait': '#1EC2EB'
+  };
+
+  function _updateResourceUsageInCache(opNumber) {
+    var items = oDataModel.getProperty('/items');
+    if (!items || !items.length) return;
+
+    var machineSet  = {};
+    var robotSet    = {};
+    var operatorSet = {};
+    (_jobState.machine_list  || []).forEach(function (r) { if (r) machineSet[r]  = true; });
+    (_jobState.robot_list    || []).forEach(function (r) { if (r) robotSet[r]    = true; });
+    (_jobState.operator_list || []).forEach(function (r) { if (r) operatorSet[r] = true; });
+
+    var resourceUsage = {};
+    var quotedRe = /"([^"]+)"/g;
+
+    function walkLeaves(list) {
+      (list || []).forEach(function (item) {
+        var children = item.sub_process_items;
+        if (children && children.length) {
+          walkLeaves(children);
+        } else {
+          // leaf node — scan title for quoted resource references
+          var title = item.title || '';
+          var match;
+          quotedRe.lastIndex = 0;
+          var found = false;
+          while ((match = quotedRe.exec(title)) !== null) {
+            var inner   = match[1];           // e.g. "Op100-Machine001"
+            var resKey  = inner.split('-').pop();  // e.g. "Machine001"
+            var cycleType = null;
+            if (machineSet[resKey])   { cycleType = 'Machine cycle'; }
+            else if (robotSet[resKey])    { cycleType = 'Robot cycle'; }
+            else if (operatorSet[resKey]) { cycleType = 'Operator wait'; }
+            if (cycleType) {
+              var resolvedType = (cycleType === 'Operator wait') ? 'Manual cycle' : cycleType;
+              item.color      = _CYCLE_TYPE_COLORS[resolvedType] || item.color;
+              item.cycle_type = resolvedType;
+              var ct = item.cycle_time || 0;
+              resourceUsage[inner] = (resourceUsage[inner] || 0) + ct;
+              found = true;
+            }
+          }
+          if (!found && item.cycle_type !== 'Station' && item.cycle_type !== 'Process group') {
+            item.cycle_type = 'Undefined';
+            item.color      = '#09528A';
+          }
+        }
+      });
+    }
+
+    walkLeaves(items);
+
+    // Build filtered summary: only machine/robot/operator entries
+    var summary = {};
+    Object.keys(resourceUsage).forEach(function (key) {
+      summary[key] = Math.round(resourceUsage[key] * 100) / 100;
+    });
+
+    if (!_opMetaMap[opNumber]) { _opMetaMap[opNumber] = {}; }
+    _opMetaMap[opNumber].machine_cycle_time_summary = JSON.stringify(summary);
+
+    oDataModel.refresh(true);
+    _opTreeCache[opNumber] = JSON.parse(JSON.stringify(items));
+    _tryRefreshReport();
+  }
+
+  function _tryRefreshReport() {
+    if (oIconTabBar && oIconTabBar.getSelectedKey() === 'reports') {
+      _renderReportTable();
+    }
+  }
+
+  function _insertTitleCompletion(inputEl, opNumber, word) {
+    var text   = inputEl.value;
+    var cursor = inputEl.selectionStart;
+    var start  = cursor;
+    while (start > 0 && /\w/.test(text[start - 1])) { start--; }
+    var end = cursor;
+    while (end < text.length && /\w/.test(text[end])) { end++; }
+    var prefix   = text.slice(0, start).replace(/\s+$/, '');
+    var suffix   = text.slice(end).replace(/^\s+/, '');
+    var inserted = '"' + opNumber + '-' + word + '"';
+    var newText  = (prefix ? prefix + ' ' : '') + inserted + (suffix ? ' ' + suffix : '');
+    inputEl.value = newText;
+    inputEl.setSelectionRange(newText.length, newText.length);
+  }
+
+  function _attachTitleAutocomplete(inputEl, opNumber) {
+    var resources = _getResourceSuggestions();
+    if (!resources.length) return;
+
+    var activeIndex = -1;
+
+    function _acDropdown() { return document.getElementById('vtAcDropdown'); }
+
+    function _wordUnderCursor() {
+      var text = inputEl.value, cursor = inputEl.selectionStart, start = cursor;
+      while (start > 0 && /\w/.test(text[start - 1])) { start--; }
+      return text.slice(start, cursor);
+    }
+
+    function hideDropdown() {
+      var d = _acDropdown(); if (d) d.parentNode.removeChild(d);
+      activeIndex = -1;
+    }
+
+    function setActive(idx) {
+      var d = _acDropdown(); if (!d) return;
+      var items = d.querySelectorAll('div[data-ac]');
+      items.forEach(function (el, i) {
+        el.style.background = i === idx ? '#e8f0f8' : '';
+        el.style.color      = i === idx ? '#09528A' : '#32363a';
+        el.style.fontWeight = i === idx ? '600' : '';
+      });
+      activeIndex = idx;
+    }
+
+    function showDropdown(matches) {
+      hideDropdown();
+      var d = document.createElement('div');
+      d.id = 'vtAcDropdown';
+      d.style.cssText =
+        'position:fixed;z-index:99999;background:#fff;' +
+        'border:1px solid #09528A;border-radius:4px;' +
+        'box-shadow:0 4px 14px rgba(0,0,0,.18);' +
+        'max-height:180px;overflow-y:auto;' +
+        'font-family:72,Arial,sans-serif;font-size:13px;min-width:180px;';
+      matches.forEach(function (word, i) {
+        var item = document.createElement('div');
+        item.setAttribute('data-ac', '1');
+        item.textContent = word;
+        item.style.cssText = 'padding:5px 12px;cursor:pointer;color:#32363a;white-space:nowrap;';
+        item.addEventListener('mouseover', function () { setActive(i); });
+        item.addEventListener('mousedown', function (e) {
+          e.preventDefault();   // keep focus on input, avoid triggering blur→cancel
+          _insertTitleCompletion(inputEl, opNumber, word);
+          hideDropdown();
+        });
+        d.appendChild(item);
+      });
+      var rect = inputEl.getBoundingClientRect();
+      d.style.left = rect.left + 'px';
+      d.style.top  = (rect.bottom + 2) + 'px';
+      document.body.appendChild(d);
+      activeIndex = -1;
+    }
+
+    inputEl.addEventListener('input', function () {
+      var prefix = _wordUnderCursor();
+      if (!prefix) { hideDropdown(); return; }
+      var matches = resources.filter(function (r) { return r.indexOf(prefix) !== -1; });
+      if (matches.length) { showDropdown(matches); } else { hideDropdown(); }
+    });
+
+    // capture phase: intercept Enter/Escape/arrows before the existing commit listener
+    inputEl.addEventListener('keydown', function (e) {
+      var d = _acDropdown();
+      if (!d) return;
+      var items = d.querySelectorAll('div[data-ac]');
+      if (e.key === 'ArrowDown') {
+        e.preventDefault();
+        setActive(Math.min(activeIndex + 1, items.length - 1));
+      } else if (e.key === 'ArrowUp') {
+        e.preventDefault();
+        setActive(Math.max(activeIndex - 1, 0));
+      } else if (e.key === 'Enter') {
+        if (activeIndex >= 0 && items[activeIndex]) {
+          e.preventDefault(); e.stopPropagation();  // block the commit listener
+          _insertTitleCompletion(inputEl, opNumber, items[activeIndex].textContent);
+          hideDropdown();
+        }
+      } else if (e.key === 'Escape') {
+        e.stopPropagation();  // block cancel() — just close the popup
+        hideDropdown();
+      }
+    }, true);  // capture phase
+
+    inputEl.addEventListener('blur', hideDropdown);
+  }
+
+  // ── RC signs (bar start/end indicators) ─────────────────────────────────────
+  function _clearRcSigns() {
+    document.querySelectorAll('.vtRcSign').forEach(function (el) {
+      el.style.display = 'none';
+      el.innerHTML = '';
+    });
+    document.querySelectorAll('.vtCycleBarRoot').forEach(function (el) {
+      el.classList.remove('vtBarDim');
+    });
+  }
+
+  function _rcSignSpan(symbol, color, title) {
+    return '<span title="' + title + '" style="font-size:11px;font-weight:bold;color:' + color + ';line-height:1;">' + symbol + '</span>';
+  }
+
+  function _showRcSigns(item) {
+    _clearRcSigns();
+    if (!item || !item.item_id) return;
+    if (oRcState.activeItemIds.length !== 1) return;
+
+    var iid        = item.item_id;
+    var rc         = parseRC(item.run_cond_config);
+    var startCond  = rc.start ? rc.start.condition : '';
+    var startVals  = rc.start ? (rc.start.values || []) : [];
+    var cycleCond  = rc.cycle ? rc.cycle.condition : '';
+    var endCond    = rc.end   ? rc.end.condition   : '';
+    var endVals    = rc.end   ? (rc.end.values   || []) : [];
+    var flatMap    = buildFlatMap(oDataModel.getProperty('/items'), {});
+
+    // Dim all, then selectively un-dim relevant items
+    document.querySelectorAll('.vtCycleBarRoot').forEach(function (el) { el.classList.add('vtBarDim'); });
+
+    function _undim(id) {
+      document.querySelectorAll('.vtCycleBarRoot[data-itemid="' + id + '"]').forEach(function (el) {
+        el.classList.remove('vtBarDim');
+      });
+    }
+    function _setSign(id, slot, html) {   // slot: 'B' = before, 'A' = after
+      var el = document.getElementById('vtS' + slot + '_' + id);
+      if (el && html) { el.innerHTML = html; el.style.display = 'inline-block'; }
+    }
+
+    // ── 1. Clicked item (green/red signs from run_cond_config + gray arrows from dependant_items)
+    _undim(iid);
+
+    var selfDep = {};
+    try { selfDep = JSON.parse(item.dependant_items || '{}'); } catch (e) {}
+    var selfDepStart = (selfDep.start || []).length > 0;
+    var selfDepEnd   = (selfDep.end   || []).length > 0;
+
+    var beforeHtml = '';
+    if (startCond === RC_COND.FIRST_STATION) {
+      beforeHtml = _rcSignSpan('⊙', '#09528A', 'First Station');
+    } else if (startCond === RC_COND.FROM_ZERO) {
+      beforeHtml = _rcSignSpan('⊙', '#09528A', 'From Zero (parent start)') +
+                   _rcSignSpan('▶', '#05DF72', 'From Zero');
+    } else if (startCond === RC_COND.CUSTOM_VALUE) {
+      beforeHtml = _rcSignSpan('⧖', '#e07000', 'Fixed value start') +
+                   _rcSignSpan('▶', '#EB1E29', 'Fixed value start');
+    } else if (startCond) {
+      beforeHtml = _rcSignSpan('▶', '#05DF72', 'RC start: ' + startCond);
+    }
+    // Items whose END depends on this item start here (e.g. "Before" condition) → arrow before bar
+    if (selfDepEnd) beforeHtml += _rcSignSpan('⇒', '#888', 'A dependent item ends before this starts');
+    _setSign(iid, 'B', beforeHtml);
+
+    var afterHtml = '';
+    if (cycleCond && cycleCond !== RC_COND.SUBPROCESS && cycleCond !== RC_COND.CUSTOM_VALUE) {
+      afterHtml = _rcSignSpan('✕', '#EB1E29', 'RC end: ' + cycleCond);
+      if (endCond === RC_COND.CUSTOM_VALUE) afterHtml += _rcSignSpan('⧖', '#e07000', 'Fixed value end');
+    }
+    // Items whose START depends on this item end here (e.g. "After" condition) → arrow after bar
+    if (selfDepStart) afterHtml += _rcSignSpan('⇒', '#888', 'A dependent item starts after this ends');
+    _setSign(iid, 'A', afterHtml);
+
+    // ── 2. RC value items (referenced by run_cond_config, red signs) ─────────
+    var noValueStart = (startCond === RC_COND.CUSTOM_VALUE || startCond === RC_COND.FROM_ZERO ||
+                        startCond === RC_COND.FIRST_STATION || !startCond);
+    if (!noValueStart) {
+      startVals.forEach(function (valueId) {
+        if (!flatMap[valueId]) return;
+        _undim(valueId);
+        if (startCond === RC_COND.AFTER || startCond === RC_COND.SEQUENTIAL) {
+          _setSign(valueId, 'A', _rcSignSpan('✕', '#EB1E29', 'Clicked item starts after this'));
+        } else if (startCond === RC_COND.WITH || startCond === RC_COND.WITH_OFFSET ||
+                   startCond === RC_COND.SYNC_START) {
+          _setSign(valueId, 'B', _rcSignSpan('▶', '#EB1E29', 'Clicked item starts with this'));
+        }
+      });
+    }
+
+    var noValueEnd = (endCond === RC_COND.CUSTOM_VALUE || !endCond);
+    if (!noValueEnd) {
+      endVals.forEach(function (valueId) {
+        if (!flatMap[valueId]) return;
+        _undim(valueId);
+        if (endCond === RC_COND.WITH || endCond === RC_COND.SYNC_COMPLETION) {
+          _setSign(valueId, 'A', _rcSignSpan('✕', '#EB1E29', 'Clicked item ends with this'));
+        } else if (endCond === RC_COND.BEFORE) {
+          _setSign(valueId, 'B', _rcSignSpan('▶', '#EB1E29', 'Clicked item ends before this'));
+        }
+      });
+    }
+
+    // ── 3. Dependent items (from dependant_items JSON, gray arrows) ──────────
+    try {
+      var depJson = JSON.parse(item.dependant_items || '{}');
+      Object.keys(depJson).forEach(function (phase) {
+        (depJson[phase] || []).forEach(function (depId) {
+          if (!flatMap[depId]) return;
+          _undim(depId);
+          if (phase === 'start') {
+            _setSign(depId, 'B', _rcSignSpan('⇒', '#888', 'Depends on clicked item to start'));
+          } else if (phase === 'end') {
+            _setSign(depId, 'A', _rcSignSpan('⇒', '#888', 'Depends on clicked item to end'));
+          }
+        });
+      });
+    } catch (e) {}
+  }
+
   window.__vtOnItemDblClick = function (sId, onAfterCommit) {
     var oCtrl = sap.ui.getCore().byId(sId);
     if (!oCtrl) return;
@@ -1495,6 +1875,8 @@ sap.ui.getCore().attachInit(function () {
     oInput.focus();
     oInput.select();
 
+    _attachTitleAutocomplete(oInput, oOpSelect.getSelectedKey());
+
     var committed = false;
 
     function commit() {
@@ -1508,6 +1890,7 @@ sap.ui.getCore().attachInit(function () {
         if (updated) {
           console.log("[ValiantTMS] Model updated:", itemId, "→", newTitle);
           oDataModel.refresh(true);  // push change to all bound controls (no DB save yet)
+          _updateResourceUsageInCache(oOpSelect.getSelectedKey());
         } else {
           console.warn("[ValiantTMS] item_id not found in model:", itemId);
           oCtrl.invalidate();
@@ -1654,6 +2037,8 @@ sap.ui.getCore().attachInit(function () {
       oRm.write('<div');
       oRm.writeControlData(oCtrl);
       oRm.writeAttribute("onclick", "window.__vtOnItemClick('" + oCtrl.getId() + "')");
+      oRm.writeAttribute("class", "vtCycleBarRoot");
+      oRm.writeAttribute("data-itemid", iid);
       oRm.addStyle("position",    "relative");
       oRm.addStyle("width",       "100%");
       oRm.addStyle("height",      "36px");
@@ -1670,6 +2055,11 @@ sap.ui.getCore().attachInit(function () {
                 'width:' + spacerW + 'px;height:' + barH + 'px;' +
                 'border-bottom:1px dashed lightgray;"></div>');
 
+      // RC sign — before bar (positioned at left edge of bar, popping leftward)
+      oRm.write('<span id="vtSB_' + iid + '" class="vtRcSign"' +
+                ' style="position:absolute;display:none;left:' + (spacerW - 2) + 'px;top:50%;' +
+                'transform:translate(-100%,-50%);z-index:5;line-height:1;pointer-events:none;white-space:nowrap;"></span>');
+
       // Bar — solid for leaves, dashed outline for parents
       oRm.write(
         '<div onmouseenter="window._vtShowTooltip(\'' + iid + '\',event)"' +
@@ -1682,6 +2072,11 @@ sap.ui.getCore().attachInit(function () {
         (barShadow !== "none" ? 'box-shadow:' + barShadow + ';' : '') +
         '"></div>'
       );
+
+      // RC sign — after bar
+      oRm.write('<span id="vtSA_' + iid + '" class="vtRcSign"' +
+                ' style="position:absolute;display:none;left:' + (spacerW + barW + 2) + 'px;top:50%;' +
+                'transform:translateY(-50%);z-index:5;line-height:1;pointer-events:none;white-space:nowrap;"></span>');
 
       // One vertical line per ancestor, nearest first (parent, grandparent, great-grandparent …)
       var ancestorEnds = oCtrl.getAncestorEnds();
@@ -2031,8 +2426,10 @@ sap.ui.getCore().attachInit(function () {
         maxCycleEnd = getMaxCycleEnd(items) || 500;
         _opTreeCache[opNumber] = JSON.parse(JSON.stringify(items));
         oDataModel.setData({ items: items, maxCycleEnd: maxCycleEnd });
+        _updateResourceUsageInCache(opNumber);
         updateGanttColumn();
         updateRuler();
+        setTimeout(_updateMiniPie, 150);
         if (oIconTabBar && oIconTabBar.getSelectedKey() === 'plots') { refreshPlots(opNumber); }
       })
       .catch(function (err) {
@@ -2047,6 +2444,7 @@ sap.ui.getCore().attachInit(function () {
     annotateAncestors(items, []);
     maxCycleEnd = getMaxCycleEnd(items) || 500;
     oDataModel.setData({ items: items, maxCycleEnd: maxCycleEnd });
+    _updateResourceUsageInCache(opNumber);
     updateGanttColumn();
     updateRuler();
     if (oIconTabBar && oIconTabBar.getSelectedKey() === 'plots') { refreshPlots(opNumber); }
@@ -3232,12 +3630,24 @@ sap.ui.getCore().attachInit(function () {
     ]
   }).addStyleClass('vtRcAddRemoveBox');
 
+  var oMiniPieWidget = new sap.ui.core.HTML({
+    sanitizeContent: false,
+    preferDOM: true,
+    content:
+      '<div class="vtMiniPieWrap">' +
+        '<div style="position:relative;width:80px;height:80px;flex-shrink:0;">' +
+          '<canvas id="vtMiniPieCanvas"></canvas>' +
+        '</div>' +
+        '<div id="vtMiniPieInfo" class="vtMiniPieInfo">—</div>' +
+      '</div>'
+  });
+
   // ── RC section: three GroupBox-style panels + status bar ─────────────────
   var oRcToolbar = new sap.m.VBox({
     width: '100%',
     items: [
       new sap.m.FlexBox({ wrap: 'Wrap', alignItems: 'Stretch', width: '100%',
-        items: [ oAddRemoveBox, oRcPhasesBox, new sap.m.ToolbarSpacer(), oCopyPasteBox ]
+        items: [ oAddRemoveBox, oRcPhasesBox, new sap.m.ToolbarSpacer(), oCopyPasteBox, new sap.m.ToolbarSpacer(), oMiniPieWidget ]
       }),
       oRcStatusBar
     ]
@@ -3284,12 +3694,35 @@ sap.ui.getCore().attachInit(function () {
   var _chartInstances = {};
   var _plotsCurrentOp = null;
 
+  Chart.register({
+    id: 'vtBarLabels',
+    afterDatasetsDraw: function (chart) {
+      var ctx = chart.ctx;
+      chart.data.datasets.forEach(function (dataset, i) {
+        if (dataset.type === 'line') return;
+        var meta = chart.getDatasetMeta(i);
+        if (meta.hidden) return;
+        meta.data.forEach(function (bar, idx) {
+          var value = dataset.data[idx];
+          if (!value) return;
+          ctx.save();
+          ctx.font = 'bold 9px Arial';
+          ctx.fillStyle = '#32363a';
+          ctx.textAlign = 'center';
+          ctx.textBaseline = 'bottom';
+          ctx.fillText(value + 's', bar.x, bar.y - 3);
+          ctx.restore();
+        });
+      });
+    }
+  });
+
   function _destroyChart(id) {
     if (_chartInstances[id]) { _chartInstances[id].destroy(); delete _chartInstances[id]; }
   }
 
   function _computeCycleTypeSums(items) {
-    var sums = { Machine: 0.0, Manual: 0.0, Robot: 0.0, Operator: 0.0 };
+    var sums = { 'Machine cycle': 0.0, 'Manual cycle': 0.0, 'Robot cycle': 0.0, 'Operator wait': 0.0 };
     function walk(list) {
       (list || []).forEach(function (item) {
         if (Object.prototype.hasOwnProperty.call(sums, item.cycle_type)) {
@@ -3300,6 +3733,46 @@ sap.ui.getCore().attachInit(function () {
     }
     walk(items);
     return sums;
+  }
+
+  function _extractLeafResourceUsage(items) {
+    var usage    = {};
+    var quotedRe = /"([^"]+)"/g;
+    var machineSet = {}, robotSet = {}, operatorSet = {};
+    (_jobState.machine_list  || []).forEach(function (r) { if (r) machineSet[r]  = true; });
+    (_jobState.robot_list    || []).forEach(function (r) { if (r) robotSet[r]    = true; });
+    (_jobState.operator_list || []).forEach(function (r) { if (r) operatorSet[r] = true; });
+    function walkLeaves(list) {
+      (list || []).forEach(function (item) {
+        if (item.sub_process_items && item.sub_process_items.length) {
+          walkLeaves(item.sub_process_items);
+        } else {
+          var title = item.title || '';
+          quotedRe.lastIndex = 0;
+          var match;
+          while ((match = quotedRe.exec(title)) !== null) {
+            var inner  = match[1];
+            var resKey = inner.split('-').pop();
+            if (machineSet[resKey] || robotSet[resKey] || operatorSet[resKey]) {
+              usage[inner] = (usage[inner] || 0) + (item.cycle_time || 0);
+            }
+          }
+        }
+      });
+    }
+    walkLeaves(items);
+    return usage;
+  }
+
+  function _sortedResourceChart(usageObj) {
+    var pairs = Object.keys(usageObj).map(function (k) {
+      return [k, Math.round(usageObj[k] * 100) / 100];
+    });
+    pairs.sort(function (a, b) { return a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0; });
+    return {
+      cats: pairs.map(function (p) { return p[0]; }),
+      vals: pairs.map(function (p) { return p[1]; })
+    };
   }
 
   function _renderPieChart(canvasId, usedTime, totalTarget, numOfParts) {
@@ -3327,11 +3800,48 @@ sap.ui.getCore().attachInit(function () {
         responsive: true,
         maintainAspectRatio: false,
         plugins: {
+          vtBarLabels: false,
           legend: { position: 'bottom', labels: { font: { family: '72,Arial,sans-serif', size: 11 }, padding: 10 } },
           tooltip: { callbacks: { label: function (c) { return c.label + ': ' + c.parsed + 's'; } } }
         }
       }
     });
+  }
+
+  function _updateMiniPie() {
+    var canvas = document.getElementById('vtMiniPieCanvas');
+    if (!canvas) return;
+    var target    = _jobState.target_cycle_time || 0;
+    var used      = Math.round((maxCycleEnd || 0) * 100) / 100;
+    var remaining = Math.round((target - used) * 100) / 100;
+    var labels, data, colors;
+    if (remaining < 0) {
+      labels = ['Excess', 'Target']; data = [Math.abs(remaining), target]; colors = ['#cc0000', '#dddddd'];
+    } else {
+      labels = ['Used', 'Remaining']; data = [used, remaining || 0.01]; colors = ['#09528A', '#e8e8e8'];
+    }
+    _destroyChart('vtMiniPie');
+    _chartInstances['vtMiniPie'] = new Chart(canvas, {
+      type: 'pie',
+      data: { labels: labels, datasets: [{ data: data, backgroundColor: colors, borderWidth: 1, borderColor: '#fff' }] },
+      options: {
+        responsive: true, maintainAspectRatio: false,
+        animation: { duration: 300 },
+        plugins: {
+          vtBarLabels: false,
+          legend: { display: false },
+          tooltip: { callbacks: { label: function (c) { return c.label + ': ' + c.parsed + 's'; } } }
+        }
+      }
+    });
+    var infoEl = document.getElementById('vtMiniPieInfo');
+    if (infoEl) {
+      var pct   = target > 0 ? Math.round(used / target * 100) : 0;
+      var color = remaining < 0 ? '#cc0000' : (pct > 85 ? '#e07000' : '#09528A');
+      infoEl.innerHTML =
+        '<span style="font-size:1.05rem;font-weight:bold;color:' + color + '">' + pct + '%</span><br>' +
+        '<span style="color:#666;font-size:0.7rem;">' + used + 's / ' + target + 's</span>';
+    }
   }
 
   function _renderBarChart(canvasId, categories, values, limitValue) {
@@ -3356,27 +3866,31 @@ sap.ui.getCore().attachInit(function () {
       options: {
         responsive: true,
         maintainAspectRatio: false,
+        layout: { padding: { top: 20 } },
         plugins: {
           legend: { display: !!limitValue, labels: { font: { family: '72,Arial,sans-serif', size: 11 } } },
           tooltip: { callbacks: { label: function (c) { return c.dataset.label + ': ' + c.parsed.y + 's'; } } }
         },
         scales: {
           y: { beginAtZero: true, title: { display: true, text: 'Time (s)', font: { family: '72,Arial,sans-serif', size: 10 } } },
-          x: { ticks: { font: { family: '72,Arial,sans-serif', size: 10 } } }
+          x: { ticks: { font: { family: '72,Arial,sans-serif', size: 10 }, maxRotation: 45 } }
         }
       }
     });
   }
 
-  function _renderOpPlots(items, numOfParts, target) {
-    var opMaxEnd   = getMaxCycleEnd(items);
+  function _renderOpPlots(items, numOfParts, target, opNumber) {
+    var opMaxEnd    = getMaxCycleEnd(items);
     var totalTarget = target * numOfParts;
     _renderPieChart('vtOpPieCanvas', opMaxEnd, totalTarget, numOfParts);
     var sums   = _computeCycleTypeSums(items);
-    var ctCats = ['Machine', 'Manual', 'Robot', 'Operator'];
+    var ctCats = ['Machine cycle', 'Manual cycle', 'Robot cycle', 'Operator wait'];
     var ctVals = ctCats.map(function (k) { return Math.round(sums[k] * 100) / 100; });
-    _renderBarChart('vtOpCTCanvas',  ctCats, ctVals, target);
-    _renderBarChart('vtOpResCanvas', ctCats, ctVals, target);
+    _renderBarChart('vtOpCTCanvas', ctCats, ctVals, target);
+    var summaryJson = (_opMetaMap[opNumber] || {}).machine_cycle_time_summary;
+    var usageObj    = summaryJson ? JSON.parse(summaryJson) : _extractLeafResourceUsage(items);
+    var rc = _sortedResourceChart(usageObj);
+    _renderBarChart('vtOpResCanvas', rc.cats, rc.vals, target);
   }
 
   function _renderStationCharts(station, stIdSafe, numOfParts, target) {
@@ -3386,11 +3900,13 @@ sap.ui.getCore().attachInit(function () {
     var used        = station.cycle_time || 0;
     var totalTarget = target * numOfParts;
     _renderPieChart(pieId, used, totalTarget, numOfParts);
-    var sums   = _computeCycleTypeSums(station.sub_process_items || []);
-    var ctCats = ['Machine', 'Manual', 'Robot', 'Operator'];
+    var children = station.sub_process_items || [];
+    var sums   = _computeCycleTypeSums(children);
+    var ctCats = ['Machine cycle', 'Manual cycle', 'Robot cycle', 'Operator wait'];
     var ctVals = ctCats.map(function (k) { return Math.round(sums[k] * 100) / 100; });
-    _renderBarChart(ctId,  ctCats, ctVals, target);
-    _renderBarChart(resId, ctCats, ctVals, target);
+    _renderBarChart(ctId, ctCats, ctVals, target);
+    var rc = _sortedResourceChart(_extractLeafResourceUsage(children));
+    _renderBarChart(resId, rc.cats, rc.vals, target);
   }
 
   function _renderStationPlots(items, numOfParts, target) {
@@ -3421,17 +3937,19 @@ sap.ui.getCore().attachInit(function () {
       panel.id = 'vtStPanel_' + stIdSafe;
       panel.style.display = i === 0 ? 'block' : 'none';
       panel.innerHTML =
-        '<div class="vtPlotCard">' +
-          '<div class="vtPlotTitle">' + stLabel + ' Calculated Cycle Time Summary</div>' +
-          '<div style="position:relative;height:180px;"><canvas id="vtSt_' + stIdSafe + '_pie"></canvas></div>' +
-        '</div>' +
-        '<div class="vtPlotCard">' +
-          '<div class="vtPlotTitle">' + stLabel + ' Cycle Type</div>' +
-          '<div style="position:relative;height:180px;"><canvas id="vtSt_' + stIdSafe + '_ct"></canvas></div>' +
-        '</div>' +
-        '<div class="vtPlotCard">' +
-          '<div class="vtPlotTitle">' + stLabel + ' Resource Usage Summary</div>' +
-          '<div style="position:relative;height:180px;"><canvas id="vtSt_' + stIdSafe + '_res"></canvas></div>' +
+        '<div class="vtPlotsGrid">' +
+          '<div class="vtPlotCard vtCardSm">' +
+            '<div class="vtPlotTitle">' + stLabel + ' Cycle Time</div>' +
+            '<div style="position:relative;height:190px;"><canvas id="vtSt_' + stIdSafe + '_pie"></canvas></div>' +
+          '</div>' +
+          '<div class="vtPlotCard vtCardMd">' +
+            '<div class="vtPlotTitle">' + stLabel + ' Cycle Type</div>' +
+            '<div style="position:relative;height:190px;"><canvas id="vtSt_' + stIdSafe + '_ct"></canvas></div>' +
+          '</div>' +
+          '<div class="vtPlotCard vtCardLg">' +
+            '<div class="vtPlotTitle">' + stLabel + ' Resource Usage</div>' +
+            '<div style="position:relative;height:190px;"><canvas id="vtSt_' + stIdSafe + '_res"></canvas></div>' +
+          '</div>' +
         '</div>';
       content.appendChild(panel);
       (function (st, safe, n, t) {
@@ -3454,15 +3972,24 @@ sap.ui.getCore().attachInit(function () {
       return Math.round(getMaxCycleEnd(_opTreeCache[op]) * 100) / 100;
     });
     _renderBarChart('vtJobCTSCanvas', cached, ctVals, target);
-    var totSums = { Machine: 0.0, Manual: 0.0, Robot: 0.0, Operator: 0.0 };
+    var totSums = { 'Machine cycle': 0.0, 'Manual cycle': 0.0, 'Robot cycle': 0.0, 'Operator wait': 0.0 };
     cached.forEach(function (op) {
       var s = _computeCycleTypeSums(_opTreeCache[op]);
       Object.keys(totSums).forEach(function (k) { totSums[k] += s[k]; });
     });
-    var ctCats = ['Machine', 'Manual', 'Robot', 'Operator'];
+    var ctCats = ['Machine cycle', 'Manual cycle', 'Robot cycle', 'Operator wait'];
     var ctTotals = ctCats.map(function (k) { return Math.round(totSums[k] * 100) / 100; });
-    _renderBarChart('vtJobCTCanvas',  ctCats, ctTotals, target);
-    _renderBarChart('vtJobResCanvas', ctCats, ctTotals, target);
+    _renderBarChart('vtJobCTCanvas', ctCats, ctTotals, target);
+    var jobUsage = {};
+    cached.forEach(function (op) {
+      var summaryJson = (_opMetaMap[op] || {}).machine_cycle_time_summary;
+      var opUsage = summaryJson ? JSON.parse(summaryJson) : _extractLeafResourceUsage(_opTreeCache[op]);
+      Object.keys(opUsage).forEach(function (k) {
+        jobUsage[k] = (jobUsage[k] || 0) + opUsage[k];
+      });
+    });
+    var jrc = _sortedResourceChart(jobUsage);
+    _renderBarChart('vtJobResCanvas', jrc.cats, jrc.vals, target);
   }
 
   function refreshPlots(opNumber) {
@@ -3479,7 +4006,7 @@ sap.ui.getCore().attachInit(function () {
       if (el && el.style.display !== 'none') { active = t; }
     });
     if (active === 'station')  { _renderStationPlots(items, numOfParts, target); }
-    else if (active === 'op')  { _renderOpPlots(items, numOfParts, target); }
+    else if (active === 'op')  { _renderOpPlots(items, numOfParts, target, opNumber); }
     else if (active === 'job') { _renderJobPlots(); }
   }
 
@@ -3505,10 +4032,10 @@ sap.ui.getCore().attachInit(function () {
       return {
         item_id:                station.item_id,
         op_number:              opNumber,
-        total_machine_cycle:    Math.round(sums.Machine  * 100) / 100,
-        total_manual_cycle:     Math.round(sums.Manual   * 100) / 100,
-        total_robot_cycle:      Math.round(sums.Robot    * 100) / 100,
-        total_operator_cycle:   Math.round(sums.Operator * 100) / 100,
+        total_machine_cycle:    Math.round(sums['Machine cycle']  * 100) / 100,
+        total_manual_cycle:     Math.round(sums['Manual cycle']   * 100) / 100,
+        total_robot_cycle:      Math.round(sums['Robot cycle']    * 100) / 100,
+        total_operator_cycle:   Math.round(sums['Operator wait']  * 100) / 100,
         used_cycle_time:        Math.round((station.cycle_time / numOfParts) * 100) / 100,
         num_of_parts:           numOfParts,
         machine_cycle_time_summary: JSON.stringify(sums)
@@ -3527,7 +4054,7 @@ sap.ui.getCore().attachInit(function () {
   window.vtSwitchPlotTab = function (tabName, btn) {
     ['station', 'op', 'job'].forEach(function (t) {
       var panel = document.getElementById('vtPlotsPanel_' + t);
-      if (panel) { panel.style.display = t === tabName ? 'flex' : 'none'; }
+      if (panel) { panel.style.display = t === tabName ? (t === 'station' ? 'flex' : 'block') : 'none'; }
     });
     document.querySelectorAll('.vtPlotsTabBtn').forEach(function (b) { b.classList.remove('vtPActive'); });
     if (btn) { btn.classList.add('vtPActive'); }
@@ -3536,7 +4063,7 @@ sap.ui.getCore().attachInit(function () {
     var numOfParts = (_opMetaMap[op] || {}).num_of_parts || 1;
     var target     = _jobState.target_cycle_time || 0;
     if (tabName === 'station')  { _renderStationPlots(items, numOfParts, target); }
-    else if (tabName === 'op')  { _renderOpPlots(items, numOfParts, target); }
+    else if (tabName === 'op')  { _renderOpPlots(items, numOfParts, target, op); }
     else if (tabName === 'job') { _renderJobPlots(); }
   };
 
@@ -3553,6 +4080,214 @@ sap.ui.getCore().attachInit(function () {
     _plotsCurrentOp = opNumber;
     if (_opTreeCache[opNumber]) { refreshPlots(opNumber); }
     else { loadTree(opNumber); }
+  };
+
+  // ── Reports tab ───────────────────────────────────────────────────────────
+
+  // Fetch one op's tree into the caches without touching any Design-tab UI.
+  function _fetchTreeToCache(opNumber) {
+    return fetch(API_BASE + "/updateTree", {
+      method:  "POST",
+      headers: { "Content-Type": "application/json" },
+      body:    JSON.stringify({ op_number: opNumber })
+    })
+    .then(function (r) {
+      if (!r.ok) throw new Error("HTTP " + r.status);
+      return r.json();
+    })
+    .then(function (response) {
+      var d = response.data || {};
+      var items = d.cycle_general_structure || d || [];
+      (d.op_metadata || []).forEach(function (row) {
+        if (row.op_number) {
+          _opMetaMap[row.op_number] = {
+            op_title:       row.op_title        || '',
+            op_description: row.job_description || '',
+            num_of_parts:   row.num_of_parts    || 1
+          };
+        }
+      });
+      if ((d.items_details || []).length) {
+        _itemsDetailsCache[opNumber] = {};
+        d.items_details.forEach(function (row) {
+          if (row.item_id) { _itemsDetailsCache[opNumber][row.item_id] = row; }
+        });
+      }
+      _applyProjectMeta((d.project_metadata || [])[0] || null);
+      annotateSteps(items, null);
+      _opTreeCache[opNumber] = JSON.parse(JSON.stringify(items));
+      _updateResourceUsageInCache(opNumber);
+    });
+  }
+
+  function _renderReportTable() {
+    var content = document.getElementById('vtRptContent');
+    if (!content) return;
+
+    var num   = _jobState.job_number        || '—';
+    var title = _jobState.job_title         || '—';
+    var tct   = parseFloat(_jobState.target_cycle_time) || 0;
+    var date  = new Date().toISOString().slice(0, 10);
+    var ops   = oOpSelect.getItems().map(function (it) { return it.getKey(); });
+
+    if (!ops.length) {
+      content.innerHTML = '<em style="color:#aaa;font-family:72,Arial,sans-serif;font-size:0.82rem;">No ops loaded yet — open the Design tab first.</em>';
+      return;
+    }
+
+    // Project summary strip
+    var html = '<div style="background:#fff;border:1px solid #e0e0e0;border-radius:6px;padding:10px 16px;margin-bottom:12px;'
+             + 'font-family:72,Arial,sans-serif;font-size:0.82rem;color:#555;display:flex;gap:24px;flex-wrap:wrap;">'
+             + '<span><strong style="color:#32363a;">Project:</strong> #' + num + ' — ' + title + '</span>'
+             + '<span><strong style="color:#32363a;">Target CT:</strong> ' + (tct ? tct + ' s' : '—') + '</span>'
+             + '<span><strong style="color:#32363a;">Report Date:</strong> ' + date + '</span>'
+             + '</div>';
+
+    // Stats table
+    var totalStations = 0;
+    var overTargetOps = 0;
+    var notLoadedOps  = 0;
+
+    html += '<div style="background:#fff;border:1px solid #e0e0e0;border-radius:6px;overflow:hidden;">'
+          + '<table style="width:100%;border-collapse:collapse;font-family:72,Arial,sans-serif;font-size:0.82rem;">'
+          + '<thead><tr style="background:#09528A;color:#fff;">'
+          + '<th style="padding:8px 12px;text-align:left;font-weight:600;">Op</th>'
+          + '<th style="padding:8px 12px;text-align:left;font-weight:600;">Title</th>'
+          + '<th style="padding:8px 12px;text-align:center;font-weight:600;">Stations</th>'
+          + '<th style="padding:8px 12px;text-align:center;font-weight:600;">CT Used</th>'
+          + '<th style="padding:8px 12px;text-align:center;font-weight:600;">Target</th>'
+          + '<th style="padding:8px 12px;text-align:center;font-weight:600;">Status</th>'
+          + '</tr></thead><tbody>';
+
+    ops.forEach(function (op, i) {
+      var m       = _opMetaMap[op] || {};
+      var tree    = _opTreeCache[op];
+      var opTitle = m.op_title || '—';
+      var rowBg   = i % 2 === 0 ? '#fff' : '#f7f9fb';
+      var stCount, ctUsed, statusCell;
+
+      if (!tree) {
+        notLoadedOps++;
+        stCount    = '<span style="color:#bbb;">—</span>';
+        ctUsed     = '<span style="color:#bbb;">—</span>';
+        statusCell = '<span style="color:#bbb;font-size:0.75rem;">not loaded</span>';
+      } else {
+        var stNum = tree.length;
+        totalStations += stNum;
+        var ct   = Math.round(getMaxCycleEnd(tree) * 10) / 10;
+        stCount  = stNum;
+        ctUsed   = ct + ' s';
+        var over = tct > 0 && ct > tct;
+        if (over) {
+          overTargetOps++;
+          statusCell = '<span style="display:inline-flex;align-items:center;gap:4px;background:#fff0f0;color:#cc0000;'
+                     + 'border:1px solid #f5c0c0;border-radius:4px;padding:2px 8px;font-weight:700;font-size:0.8rem;">'
+                     + '&#9888; !</span>';
+        } else if (tct > 0) {
+          statusCell = '<span style="display:inline-flex;align-items:center;background:#f0faf0;color:#1a7a1a;'
+                     + 'border:1px solid #b0ddb0;border-radius:4px;padding:2px 8px;font-weight:600;font-size:0.8rem;">'
+                     + '&#10003;</span>';
+        } else {
+          statusCell = '<span style="color:#bbb;">—</span>';
+        }
+      }
+
+      html += '<tr style="background:' + rowBg + ';border-top:1px solid #f0f0f0;">'
+            + '<td style="padding:8px 12px;font-weight:600;color:#09528A;">' + op + '</td>'
+            + '<td style="padding:8px 12px;color:#555;">' + opTitle + '</td>'
+            + '<td style="padding:8px 12px;text-align:center;">' + stCount + '</td>'
+            + '<td style="padding:8px 12px;text-align:center;font-weight:600;">' + ctUsed + '</td>'
+            + '<td style="padding:8px 12px;text-align:center;color:#666;">' + (tct ? tct + ' s' : '—') + '</td>'
+            + '<td style="padding:8px 12px;text-align:center;">' + statusCell + '</td>'
+            + '</tr>';
+    });
+
+    // Summary footer
+    var allLoaded = notLoadedOps === 0;
+    html += '<tr style="background:#f5f8fb;border-top:2px solid #d0d8e0;">'
+          + '<td colspan="2" style="padding:8px 12px;font-weight:600;color:#32363a;font-family:72,Arial,sans-serif;font-size:0.82rem;">'
+          + ops.length + ' op' + (ops.length !== 1 ? 's' : '') + '</td>'
+          + '<td style="padding:8px 12px;text-align:center;font-weight:600;color:#32363a;">'
+          + (allLoaded ? totalStations : totalStations + '+') + '</td>'
+          + '<td colspan="2" style="padding:8px 12px;text-align:center;color:#888;font-size:0.76rem;">'
+          + (notLoadedOps > 0 ? notLoadedOps + ' op(s) not yet opened in Design tab' : '') + '</td>'
+          + '<td style="padding:8px 12px;text-align:center;">'
+          + (overTargetOps > 0
+              ? '<span style="color:#cc0000;font-weight:700;font-size:0.8rem;">' + overTargetOps + ' over target</span>'
+              : (allLoaded && tct > 0
+                  ? '<span style="color:#1a7a1a;font-weight:600;font-size:0.8rem;">All within target</span>'
+                  : ''))
+          + '</td>'
+          + '</tr>';
+
+    html += '</tbody></table></div>';
+    content.innerHTML = html;
+  }
+
+  function syncReportTab() {
+    var content = document.getElementById('vtRptContent');
+    if (!content) return;
+    var st = document.getElementById('vtRptStatus');
+    if (st) st.style.display = 'none';
+
+    var ops      = oOpSelect.getItems().map(function (it) { return it.getKey(); });
+    var uncached = ops.filter(function (op) { return !_opTreeCache[op]; });
+
+    if (!uncached.length) {
+      _renderReportTable();
+      return;
+    }
+
+    // Show progress while fetching
+    content.innerHTML = '<div style="font-family:72,Arial,sans-serif;font-size:0.82rem;color:#09528A;padding:4px 0;">'
+                      + 'Loading data… <span id="vtRptLoadProgress">0 / ' + uncached.length + '</span></div>';
+    var done = 0;
+    var chain = Promise.resolve();
+    uncached.forEach(function (op) {
+      chain = chain.then(function () {
+        return _fetchTreeToCache(op).then(function () {
+          done++;
+          var prog = document.getElementById('vtRptLoadProgress');
+          if (prog) prog.textContent = done + ' / ' + uncached.length;
+        });
+      });
+    });
+    chain
+      .then(function () { _renderReportTable(); })
+      .catch(function (err) {
+        if (content) {
+          content.innerHTML = '<em style="color:#cc0000;font-family:72,Arial,sans-serif;font-size:0.82rem;">'
+                            + 'Error loading op data: ' + err.message + '</em>';
+        }
+      });
+  }
+
+  window.vtExportExcel = function () {
+    var btn    = document.getElementById('vtExportExcelBtn');
+    var status = document.getElementById('vtRptStatus');
+    if (btn)    { btn.disabled = true; btn.textContent = 'Generating…'; }
+    if (status) { status.style.display='block'; status.style.background='#eaf3fb'; status.style.color='#09528A'; status.textContent='Generating report — this may take a moment…'; }
+    fetch(API_BASE + '/report/excel', {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body:    JSON.stringify({
+        proj_number: _jobState.job_number || '',
+        proj_title:  _jobState.job_title  || ''
+      })
+    })
+    .then(function (r) {
+      if (!r.ok) return r.json().then(function (e) { throw new Error(e.detail || e.message || 'HTTP ' + r.status); });
+      return r.json();
+    })
+    .then(function (res) {
+      var msg = (res && res.message) ? res.message : 'Report generated and opened.';
+      if (status) { status.style.background='#f0faf0'; status.style.color='#1a7a1a'; status.textContent=msg; }
+    })
+    .catch(function (err) {
+      if (status) { status.style.background='#fff0f0'; status.style.color='#cc0000'; status.textContent='Error: ' + err.message; }
+      sap.m.MessageToast.show('Export failed: ' + err.message);
+    })
+    .finally(function () { if (btn) { btn.disabled=false; btn.textContent='Export Excel'; } });
   };
 
   // ── Tab Bar ───────────────────────────────────────────────────────────────
@@ -3601,18 +4336,22 @@ sap.ui.getCore().attachInit(function () {
               '</div>',
 
               // Op Plots panel
-              '<div id="vtPlotsPanel_op" style="flex:1;overflow-y:auto;padding:8px;display:none;flex-direction:column;">',
-                '<div class="vtPlotCard"><div class="vtPlotTitle">Op Calculated Cycle Time Summary</div><div style="position:relative;height:200px;"><canvas id="vtOpPieCanvas"></canvas></div></div>',
-                '<div class="vtPlotCard"><div class="vtPlotTitle">Op Cycle Type Summary</div><div style="position:relative;height:200px;"><canvas id="vtOpCTCanvas"></canvas></div></div>',
-                '<div class="vtPlotCard"><div class="vtPlotTitle">Op Resource Usage Summary</div><div style="position:relative;height:200px;"><canvas id="vtOpResCanvas"></canvas></div></div>',
+              '<div id="vtPlotsPanel_op" style="flex:1;overflow-y:auto;display:none;">',
+                '<div class="vtPlotsGrid">',
+                  '<div class="vtPlotCard vtCardSm"><div class="vtPlotTitle">Op Cycle Time</div><div style="position:relative;height:200px;"><canvas id="vtOpPieCanvas"></canvas></div></div>',
+                  '<div class="vtPlotCard vtCardMd"><div class="vtPlotTitle">Op Cycle Type Summary</div><div style="position:relative;height:200px;"><canvas id="vtOpCTCanvas"></canvas></div></div>',
+                  '<div class="vtPlotCard vtCardLg"><div class="vtPlotTitle">Op Resource Usage Summary</div><div style="position:relative;height:200px;"><canvas id="vtOpResCanvas"></canvas></div></div>',
+                '</div>',
               '</div>',
 
               // Job Plots panel
-              '<div id="vtPlotsPanel_job" style="flex:1;overflow-y:auto;padding:8px;display:none;flex-direction:column;">',
-                '<div id="vtJobPlotsNote" style="font-size:0.78rem;color:#888;padding:4px 2px;font-family:72,Arial,sans-serif;"></div>',
-                '<div class="vtPlotCard"><div class="vtPlotTitle">Job Cycle Time Usage Summary</div><div style="position:relative;height:200px;"><canvas id="vtJobCTSCanvas"></canvas></div></div>',
-                '<div class="vtPlotCard"><div class="vtPlotTitle">Job Cycle Type</div><div style="position:relative;height:200px;"><canvas id="vtJobCTCanvas"></canvas></div></div>',
-                '<div class="vtPlotCard"><div class="vtPlotTitle">Job Resource Usage Summary</div><div style="position:relative;height:200px;"><canvas id="vtJobResCanvas"></canvas></div></div>',
+              '<div id="vtPlotsPanel_job" style="flex:1;overflow-y:auto;display:none;">',
+                '<div class="vtPlotsGrid">',
+                  '<div id="vtJobPlotsNote" class="vtCardFull" style="font-size:0.78rem;color:#888;padding:2px 2px 0;font-family:72,Arial,sans-serif;"></div>',
+                  '<div class="vtPlotCard vtCardFull"><div class="vtPlotTitle">Cycle Time Per Op</div><div style="position:relative;height:200px;"><canvas id="vtJobCTSCanvas"></canvas></div></div>',
+                  '<div class="vtPlotCard vtCardMd"><div class="vtPlotTitle">Job Cycle Type Summary</div><div style="position:relative;height:200px;"><canvas id="vtJobCTCanvas"></canvas></div></div>',
+                  '<div class="vtPlotCard vtCardLg"><div class="vtPlotTitle">Job Resource Usage Summary</div><div style="position:relative;height:200px;"><canvas id="vtJobResCanvas"></canvas></div></div>',
+                '</div>',
               '</div>',
 
             '</div>'
@@ -3622,8 +4361,30 @@ sap.ui.getCore().attachInit(function () {
       new sap.m.IconTabFilter({
         key: "reports", text: "Reports",
         content: [new sap.ui.core.HTML({
-          content:         '<div style="padding:48px;color:#aaa;font-family:72,Arial,sans-serif;font-size:15px;">Reports — coming soon</div>',
-          sanitizeContent: false
+          sanitizeContent: false,
+          content: [
+            '<div id="vtReportRoot" style="height:calc(100vh - 110px);display:flex;flex-direction:column;background:#f5f5f5;">',
+
+              // Top action bar
+              '<div style="padding:10px 16px;border-bottom:1px solid #e0e0e0;background:#fff;display:flex;align-items:center;justify-content:space-between;flex-shrink:0;">',
+                '<span style="font-size:1rem;font-weight:600;font-family:72,Arial,sans-serif;color:#32363a;">Cycle Chart Report Export</span>',
+                '<button id="vtExportExcelBtn" onclick="vtExportExcel()"',
+                  ' style="padding:6px 20px;background:#09528A;color:#fff;border:none;border-radius:4px;',
+                  'font-size:0.85rem;font-family:72,Arial,sans-serif;cursor:pointer;font-weight:600;">',
+                  'Export Excel',
+                '</button>',
+              '</div>',
+
+              // Content
+              '<div style="flex:1;padding:16px;overflow-y:auto;display:flex;flex-direction:column;gap:10px;">',
+                '<div id="vtRptContent" style="font-family:72,Arial,sans-serif;font-size:0.82rem;color:#555;">',
+                  '<em style="color:#aaa;">Open the Reports tab after loading ops to see the summary.</em>',
+                '</div>',
+                '<div id="vtRptStatus" style="padding:8px 14px;font-size:0.81rem;font-family:72,Arial,sans-serif;border-radius:6px;display:none;"></div>',
+              '</div>',
+
+            '</div>'
+          ].join('')
         })]
       })
     ],
@@ -3637,6 +4398,8 @@ sap.ui.getCore().attachInit(function () {
           var op = _plotsCurrentOp || oOpSelect.getSelectedKey();
           if (op) { refreshPlots(op); }
         }, 60);
+      } else if (key === "reports") {
+        setTimeout(syncReportTab, 60);
       }
     }
   });

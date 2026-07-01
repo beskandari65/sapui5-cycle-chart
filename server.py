@@ -11,9 +11,156 @@ except ImportError:
     raise SystemExit(1)
 
 import os
+import io
+import datetime
 import sqlite3
 
+try:
+    import xlsxwriter as _xlw
+    _HAS_XLSXWRITER = True
+except ImportError:
+    _HAS_XLSXWRITER = False
+
 app = Flask(__name__)
+
+# ── Excel export constants ────────────────────────────────────────────────────
+_THEME_COLOR = '#09528A'
+_CT_COLORS   = {
+    'Machine':       '#05DF72',
+    'Robot':         '#EBDD6C',
+    'Manual':        '#EB1E29',
+    'Operator':      '#FFA500',
+    'Station':       '#09528A',
+    'Process group': '#1A7FC4',
+    'Undefined':     '#C0C0C0',
+}
+
+def _xls_annotate_steps(items, prefix=None):
+    for k, item in enumerate(items or []):
+        child_pfx = str(k + 1) if prefix is None else f'{prefix}_{k + 1}'
+        item['step'] = f'S{k + 1}' if prefix is None else f'P{child_pfx}'
+        _xls_annotate_steps(item.get('sub_process_items', []), child_pfx)
+
+def _xls_flatten(items, out=None):
+    if out is None:
+        out = []
+    for it in (items or []):
+        if it.get('title'):
+            out.append(it)
+        _xls_flatten(it.get('sub_process_items', []), out)
+    return out
+
+def _xls_wrap(text, w=50):
+    t = str(text or '')
+    return '\n'.join(t[i:i + w] for i in range(0, len(t), w)) if t else ''
+
+def _make_excel_report(proj_num, proj_title, target_ct, ops_data):
+    """Generate in-memory .xlsx; returns a BytesIO seeked to 0."""
+    out = io.BytesIO()
+    wb  = _xlw.Workbook(out, {'in_memory': True})
+    date_str = datetime.datetime.now().strftime('%Y-%m-%d')
+
+    # ── Cover sheet ──────────────────────────────────────────────────────────
+    ws = wb.add_worksheet('Cover Page')
+    ws.set_paper(1); ws.set_portrait(); ws.fit_to_pages(1, 0)
+    ws.set_margins(0.2, 0.3, 0.8, 0.6)
+    f_rpt  = wb.add_format({'align':'center','valign':'vcenter','font_size':15,'font_name':'Arial','font_color':_THEME_COLOR,'italic':True,'border':0})
+    f_date = wb.add_format({'align':'center','valign':'vcenter','font_size':12,'font_name':'Arial','font_color':_THEME_COLOR,'italic':True,'border':0})
+    f_ttl  = wb.add_format({'bold':True,'align':'center','valign':'vcenter','font_size':26,'font_name':'Arial','font_color':_THEME_COLOR,'text_wrap':True,'border':0})
+    f_ct   = wb.add_format({'bold':True,'align':'center','valign':'vcenter','font_size':14,'font_name':'Arial','font_color':_THEME_COLOR,'border':0})
+    ws.set_row(0, 30); ws.merge_range('A1:P1', 'Cycle Chart Report', f_rpt)
+    ws.set_row(1, 25); ws.merge_range('A2:P2', date_str, f_date)
+    ws.set_row(2, 80); ws.merge_range('A3:P3', f'Program #{proj_num} - {proj_title}', f_ttl)
+    ws.set_row(3, 40); ws.merge_range('A4:P4', f'Target Cycle Time: {target_ct}s', f_ct)
+
+    # ── Per-op sheets ─────────────────────────────────────────────────────────
+    for opd in ops_data:
+        op_num   = opd['op_number']
+        op_title = opd['op_title']
+        used_ct  = opd['used_ct']
+        rows     = opd['flat_items']
+        if not rows:
+            continue
+
+        sn = str(op_num)[:31]
+        ws = wb.add_worksheet(sn)
+        ws.set_paper(1); ws.set_portrait(); ws.fit_to_pages(1, 0)
+        ws.set_margins(0.2, 0.3, 0.8, 0.6)
+        ws.set_header(
+            f'&R&"Arial,Italic"&10&K{_THEME_COLOR.lstrip("#")}'
+            f'Program #{proj_num} - {proj_title}\n'
+            f'{op_num} - {op_title}\n'
+            f'Target Cycle Time: {target_ct}s - Actual Calculated Time: {used_ct}s'
+        )
+
+        f_mrg  = wb.add_format({'bold':True,'align':'center','valign':'vcenter','border':0,'bg_color':_THEME_COLOR,'font_color':'white','font_size':12,'font_name':'Arial'})
+        f_chdr = wb.add_format({'bold':True,'bg_color':'#D9D9D9','border':1,'font_name':'Arial','font_size':10,'align':'center','valign':'vcenter'})
+        f_cell = wb.add_format({'border':1,'font_name':'Arial','font_size':9,'text_wrap':True,'valign':'vcenter'})
+        f_num  = wb.add_format({'border':1,'font_name':'Arial','font_size':9,'num_format':'0.00','valign':'vcenter','align':'center'})
+
+        ws.set_column(0, 0, 35); ws.set_column(1, 4, 13)
+        ws.set_row(0, 18); ws.merge_range('A1:P1', f'Program #{proj_num} - {proj_title}', f_mrg)
+        ws.set_row(1, 18); ws.merge_range('A2:P2', f'{op_num} - {op_title}', f_mrg)
+        ws.set_row(2, 18); ws.merge_range('A3:P3', f'Target Cycle Time: {target_ct}s - Actual Calculated time: {used_ct}s', f_mrg)
+
+        HDR = 3   # 0-indexed → Excel row 4 ("A4")
+        DST = HDR + 1
+        n   = len(rows)
+
+        for c, h in enumerate(['Step / Title', 'Cycle Start', 'Cycle Time', 'Cycle End', 'Cycle Type']):
+            ws.write(HDR, c, h, f_chdr)
+
+        for ri, it in enumerate(rows):
+            r   = DST + ri
+            lbl = _xls_wrap(f"{it.get('step','')}> {it.get('title','')}")
+            ct  = it.get('cycle_type') or 'Undefined'
+            ws.set_row(r, 30)
+            ws.write(r, 0, lbl, f_cell)
+            ws.write(r, 1, it.get('cycle_start') or 0.0, f_num)
+            ws.write(r, 2, it.get('cycle_time')  or 0.0, f_num)
+            ws.write(r, 3, it.get('cycle_end')   or 0.0, f_num)
+            ws.write(r, 4, ct, f_cell)
+
+        chart = wb.add_chart({'type': 'bar', 'subtype': 'stacked'})
+        chart.add_series({
+            'name': '', 'show_in_legend': False,
+            'categories': [sn, DST, 0, DST + n - 1, 0],
+            'values':     [sn, DST, 1, DST + n - 1, 1],
+            'fill': {'none': True}, 'border': {'none': True}
+        })
+
+        seen, uq = set(), []
+        for it in rows:
+            ct = it.get('cycle_type') or 'Undefined'
+            if ct not in seen: seen.add(ct); uq.append(ct)
+
+        for i, ct in enumerate(uq):
+            ci = 5 + i
+            ws.write(HDR, ci, ct, f_chdr)
+            for j, it in enumerate(rows):
+                v = (it.get('cycle_time') or 0.0) if (it.get('cycle_type') or 'Undefined') == ct else None
+                if v is not None:
+                    ws.write(DST + j, ci, v)
+            chart.add_series({
+                'name': ct,
+                'categories': [sn, DST, 0, DST + n - 1, 0],
+                'values':     [sn, DST, ci, DST + n - 1, ci],
+                'fill':   {'color': _CT_COLORS.get(ct, '#888888')},
+                'border': {'width': 1.3, 'color': 'black'}
+            })
+
+        chart.set_x_axis({'min': 0, 'name': 'Cycle Time (s)',
+                          'major_gridlines': {'visible': True, 'line': {'color': '#E3E3E3', 'width': 0.5}}})
+        chart.set_y_axis({'reverse': True, 'num_font': {'name': 'Calibri', 'size': 10},
+                          'major_gridlines': {'visible': True, 'line': {'color': '#E3E3E3', 'width': 0.5}}})
+        chart.set_legend({'position': 'top', 'font': {'size': 12}})
+        chart.set_plotarea({'border': {'none': True}})
+        chart.set_size({'width': 1020, 'height': 200 + n * 45})
+        ws.insert_chart('A4', chart)
+
+    wb.close()
+    out.seek(0)
+    return out
 
 # ── Real DB configuration (optional) ──────────────────────────────────────────
 # Set DB_PATH to your .db or .sqlite file to use a real database.
@@ -204,6 +351,12 @@ def get_records(op_number):
         conn = sqlite3.connect(DB_PATH)
         conn.row_factory = sqlite3.Row
         cur = conn.cursor()
+        # Ensure dependant_items column exists (schema migration for older DBs)
+        cur.execute(f"PRAGMA table_info({TABLE_NAME})")
+        existing_cols = {row[1] for row in cur.fetchall()}
+        if "dependant_items" not in existing_cols:
+            cur.execute(f"ALTER TABLE {TABLE_NAME} ADD COLUMN dependant_items TEXT DEFAULT '{{}}'")
+            conn.commit()
         cur.execute(f"SELECT * FROM {TABLE_NAME} WHERE op_number = ?", (op_number,))
         rows = [dict(r) for r in cur.fetchall()]
         conn.close()
@@ -371,11 +524,23 @@ def api_update_db():
     if DB_PATH and os.path.exists(DB_PATH):
         conn = sqlite3.connect(DB_PATH)
         cur  = conn.cursor()
+
+        # Discover existing columns; auto-add any new ones from the payload
+        cur.execute(f"PRAGMA table_info({TABLE_NAME})")
+        existing_cols = {row[1] for row in cur.fetchall()}
+        all_payload_cols = {c for rec in flat for c in rec if c not in ("item_id", "sub_process_items", "nodes", "_ancestorEnds")}
+        for new_col in all_payload_cols - existing_cols:
+            try:
+                cur.execute(f"ALTER TABLE {TABLE_NAME} ADD COLUMN {new_col} TEXT DEFAULT '{{}}'")
+                existing_cols.add(new_col)
+            except Exception:
+                pass
+
         for record in flat:
             item_id = record.get("item_id")
             if not item_id:
                 continue
-            cols = [c for c in record if c != "item_id"]
+            cols = [c for c in record if c != "item_id" and c in existing_cols]
             if not cols:
                 continue
             set_clause = ", ".join(c + " = ?" for c in cols)
@@ -718,6 +883,44 @@ def api_save_items_details():
         ITEMS_DETAILS[op_number] = records
 
     return jsonify({"status": "success", "saved": len(records)})
+
+
+@app.route('/api/export/excel', methods=['POST'])
+def api_export_excel():
+    if not _HAS_XLSXWRITER:
+        return jsonify({'error': 'xlsxwriter not installed. Run: pip install xlsxwriter'}), 500
+
+    data       = request.get_json() or {}
+    op_nums    = data.get('op_numbers') or get_op_numbers()
+    proj       = JOB_METADATA
+    proj_num   = str(proj.get('job_number') or proj.get('project_no') or '')
+    proj_title = str(proj.get('job_title')  or proj.get('project_title') or '')
+    target_ct  = proj.get('target_cycle_time', 60)
+
+    ops_data = []
+    for op in op_nums:
+        records = get_records(op)
+        if not records:
+            continue
+        tree = build_tree(records)
+        _xls_annotate_steps(tree, None)
+        flat = _xls_flatten(tree)
+        meta = OP_METADATA.get(op, {})
+        used = round(max((r.get('cycle_end') or 0.0 for r in records), default=0.0), 2)
+        ops_data.append({'op_number': op, 'op_title': meta.get('op_title', ''), 'used_ct': used, 'flat_items': flat})
+
+    date_str   = datetime.datetime.now().strftime('%Y-%m-%d')
+    safe_num   = proj_num.replace('/', '_').replace('\\', '_')
+    safe_title = proj_title.replace('/', '_').replace('\\', '_')
+    fname      = f'#{safe_num}_{safe_title}_{date_str}.xlsx'
+
+    xls = _make_excel_report(proj_num, proj_title, target_ct, ops_data)
+    return send_file(
+        xls,
+        mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        as_attachment=True,
+        download_name=fname
+    )
 
 
 if __name__ == "__main__":
