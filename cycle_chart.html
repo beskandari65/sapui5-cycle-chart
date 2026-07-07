@@ -81,20 +81,42 @@
                  box-shadow:0 4px 16px rgba(0,0,0,.25);font-size:12px;line-height:1.6; }
 
     /* Cycle Time Calculator */
-    .vtCalcGenBox  { padding: 8px; }
-    .vtCalcGenBox > * { margin-bottom: 4px !important; }
-    .vtCalcOpLabel.sapMText { font-size: 0.8rem; color: #888; text-align: right; min-height: 18px; width: 100%; }
+    .vtCalcGenBox { padding: 12px; display: flex !important; flex-direction: column !important; align-items: center !important; }
+    .vtCalcGenBox > * { margin-bottom: 2px !important; }
+    .vtCalcOpLabel.sapMText { font-size: 0.8rem; color: #888; text-align: right; min-height: 18px; width: 220px; }
+    .vtCalcDisplayInput.sapMInputBase { width: 220px !important; border: 2px solid #b0c4de !important; border-radius: 4px !important; }
+    .vtCalcDisplayInput.sapMInputBase input { font-size: 1.35rem !important; font-family: monospace !important; font-weight: 700 !important; color: #0854a0 !important; }
+    .vtCalcBtnWrapper.sapMVBox { width: 220px !important; gap: 3px; }
+    .vtCalcBtnRow.sapMHBox { gap: 3px; }
     .vtCalcTravelResult.sapMText { font-size: 1.1rem; font-weight: 700; color: #0854a0; }
-    .vtProcFormulaBox { padding: 0 12px; border-left: 1px solid #e0e0e0; min-width: 260px; }
+    .vtProcFormulaBox { padding: 0 16px; border-left: 2px solid #b8d0f0; min-width: 280px; }
+    .vtDialogForm.sapMVBox { gap: 3px !important; }
     .vtMatrixDisplay  { background: #f7f9fb; border: 1px solid #e0e0e0; border-radius: 4px; padding: 4px 8px; min-height: 44px; }
-    .vtMxItemRow { padding: 2px 0; border-bottom: 1px solid #f0f0f0; }
-    .vtMxItemRow > .vtMxItemText { flex: 1 1 0 !important; min-width: 0 !important; font-size: 0.78rem !important; padding-right: 4px !important; }
-    .vtMxItemRow > .vtMxTimeText { font-size: 0.78rem !important; color: #888 !important; width: 44px !important; flex-shrink: 0 !important; text-align: right !important; }
+    .vtMxColHeader.sapMLabel { display: block; text-align: center; font-size: 0.95rem; font-weight: bold; color: #0854a0; background: #eef4ff; border: 1px solid #b8d0f0; border-radius: 4px 4px 0 0; padding: 5px 0; width: 100%; }
+    .vtMxItemRow { padding: 2px 0; border-bottom: 1px solid #f0f0f0; column-gap: 10px; }
+    .vtMxItemRow > .vtMxItemText { flex: 1 1 0 !important; min-width: 0 !important; font-size: 0.8rem !important; padding-right: 4px !important; }
+    .vtMxItemRow > .vtMxTimeText { font-size: 0.8rem !important; color: #888 !important; width: 44px !important; flex-shrink: 0 !important; text-align: right !important; }
 
     /* Design status bar — sits below the table */
     .vtDesignStatusBar.sapMTB { border-top: 1px solid #d9d9d9 !important; box-shadow: none !important; margin-top: 0 !important; }
     /* Close the gap between tree table and the status bar */
     .sapUiFixFlexFlex { margin-bottom: 0 !important; padding-bottom: 0 !important; }
+
+    /* RC wait-mode blinking banner */
+    @keyframes vtRcWaitBlink {
+      0%, 49% { background-color: #e05c00; }
+      50%, 100% { background-color: #ff8c00; }
+    }
+    .vtRcWaitBar {
+      animation: vtRcWaitBlink 0.7s step-start infinite;
+      border-top: 2px solid #c04000;
+      padding: 0 10px;
+      min-height: 2.2rem;
+    }
+    .vtRcWaitBar .sapMLabel { color: #fff !important; font-weight: bold !important; font-size: 0.9rem; }
+    .vtRcWaitBar .sapMTBSpacer,
+    .vtRcWaitBar .sapMTB-Clear-CTX { background: transparent !important; }
+    .vtRcWaitBar .sapMBtnInner { color: #fff !important; border-color: rgba(255,255,255,0.5) !important; }
 
     /* Compact toolbar overrides — tighten icon-only buttons in compact mode */
     .vtRcToolbar.sapUiSizeCompact .sapMBtn .sapMBtnInner { min-width: 2rem !important; padding: 0 0.375rem !important; }
@@ -200,6 +222,8 @@ sap.ui.getCore().attachInit(function () {
   var _rcCycleSapEnterDone   = false; // prevents double-apply when Enter is pressed in cycle-time StepInput
   var _lastCellClickTime     = 0; // for double-click detection on Design tab tree rows
   var _lastHomeCellClickTime = 0; // for double-click detection on Home tab tree rows
+  var _rcShortcutPrefix      = null; // tracks first key of Alt+S/E chord shortcuts
+  var _rcShortcutTimer       = null;
 
   var clipboard = { items: [], mode: 'copy' };
 
@@ -1043,6 +1067,58 @@ sap.ui.getCore().attachInit(function () {
     oRcEndOffsetInput.setValue(eA && rc.end ? (rc.end.offset || 0) : 0);
   }
 
+  // ── Multi-item RC: Sequential / Sync Start ────────────────────────────────
+  function _applyMultiItemRc(mode, phase, oSelectCtrl) {
+    var ids     = oRcState.activeItemIds.slice();
+    var flatMap = buildFlatMap(oDataModel.getProperty('/items'), {});
+
+    if (ids.length < 2) {
+      sap.m.MessageToast.show('Select at least 2 items (Ctrl+click).');
+      if (oSelectCtrl) oSelectCtrl.setSelectedKey('');
+      return;
+    }
+    var firstParent = (flatMap[ids[0]] || {}).parent_id;
+    if (!ids.every(function (id) { return (flatMap[id] || {}).parent_id === firstParent; })) {
+      sap.m.MessageToast.show('All selected processes must share the same parent.');
+      if (oSelectCtrl) oSelectCtrl.setSelectedKey('');
+      return;
+    }
+
+    // Determine condition per phase + mode
+    var cond;
+    if (mode === 'sequential') {
+      cond = (phase === 'end') ? RC_COND.BEFORE : RC_COND.AFTER;
+    } else {
+      cond = RC_COND.WITH; // sync_start / sync_completion both map to WITH
+    }
+
+    for (var i = 1; i < ids.length; i++) {
+      var item = flatMap[ids[i]];
+      if (!item) continue;
+      var rc      = parseRC(item.run_cond_config);
+      var oldPh   = rc[phase];
+      if (oldPh && oldPh.values) { _deleteFromDependantList(flatMap, oldPh.values, ids[i]); }
+      if (oActivePhases.length === 2) {
+        ['start', 'cycle', 'end'].forEach(function (p) {
+          if (!oActivePhases.includes(p)) {
+            var old = rc[p];
+            if (old && old.values) { _deleteFromDependantList(flatMap, old.values, ids[i]); }
+            rc[p] = null;
+          }
+        });
+      }
+      var refId  = (mode === 'sequential') ? ids[i - 1] : ids[0];
+      rc[phase]  = { condition: cond, values: [refId], offset: 0.0 };
+      item.run_cond_config = serializeRC(rc);
+      _addToDependantList(flatMap, [refId], ids[i], phase);
+    }
+
+    recalcTree();
+    var updated = getCurrentItem();
+    if (updated) { refreshRcToolbar(updated); }
+    if (oSelectCtrl) oSelectCtrl.setSelectedKey('');
+  }
+
   // ── Per-phase condition handlers ──────────────────────────────────────────
 
   function onStartConditionChanged(cond) {
@@ -1060,8 +1136,8 @@ sap.ui.getCore().attachInit(function () {
       case RC_COND.FROM_ZERO:      applyRcChange('start', RC_COND.FROM_ZERO, [], 0);                            break;
       case RC_COND.FIRST_STATION:  applyRcChange('start', RC_COND.FIRST_STATION, [], 0);                        break;
       case RC_COND.CUSTOM_VALUE:   /* user types in Value field */                                               break;
-      case RC_COND.SEQUENTIAL:     enterRcWait('start', RC_COND.AFTER, 'click a process to start After...');    break;
-      case RC_COND.SYNC_START:     enterRcWait('start', RC_COND.WITH,  'click a process to start With...');     break;
+      case RC_COND.SEQUENTIAL:     _applyMultiItemRc('sequential',   'start', oRcStartSelect);               break;
+      case RC_COND.SYNC_START:     _applyMultiItemRc('sync_start',   'start', oRcStartSelect);               break;
       default:                     enterRcWait('start', cond, 'click a process to Start ' + cond);              break;
     }
   }
@@ -1097,10 +1173,11 @@ sap.ui.getCore().attachInit(function () {
     if (!oRcState.activeItemIds.length)    { sap.m.MessageToast.show("Select a row first"); oRcEndSelect.setSelectedKey(''); return; }
     oRcEndValueRow.setVisible(cond === RC_COND.CUSTOM_VALUE);
     switch (cond) {
-      case RC_COND.LAST:            applyRcChange('end', RC_COND.LAST, [], 0);                                  break;
-      case RC_COND.CUSTOM_VALUE:    /* user types in Value field */                                              break;
-      case RC_COND.SYNC_COMPLETION: enterRcWait('end', RC_COND.WITH,   'click a process to end With...');       break;
-      default:                      enterRcWait('end', cond, 'click a process to End ' + cond);                break;
+      case RC_COND.LAST:            applyRcChange('end', RC_COND.LAST, [], 0);                                          break;
+      case RC_COND.CUSTOM_VALUE:    /* user types in Value field */                                                       break;
+      case RC_COND.SYNC_COMPLETION: _applyMultiItemRc('sync_completion', 'end', oRcEndSelect);                            break;
+      case RC_COND.SEQUENTIAL:      _applyMultiItemRc('sequential',      'end', oRcEndSelect);                            break;
+      default:                      enterRcWait('end', cond, 'click a process to End ' + cond);                          break;
     }
   }
 
@@ -2860,7 +2937,8 @@ sap.ui.getCore().attachInit(function () {
     var projTitle = _jobState.job_title         || '';
     var opTitle   = opMeta.op_title             || '';
     var targetCT  = _jobState.target_cycle_time || '';
-    var usedCT    = maxCycleEnd ? maxCycleEnd.toFixed(2) : '';
+    var _actualMax = getMaxCycleEnd(oDataModel.getProperty('/items') || []);
+    var usedCT     = (op && _actualMax) ? _actualMax.toFixed(2) : '';
 
     var aStyle  = 'color:' + tc + ';text-decoration:none;cursor:pointer;';
     var opBlock = opTitle ? '&nbsp;&mdash;&nbsp;<i>' + opTitle + '</i>' : '';
@@ -3016,7 +3094,7 @@ sap.ui.getCore().attachInit(function () {
     fetch(API_BASE + "/updateTree", {
       method:  "POST",
       headers: { "Content-Type": "application/json" },
-      body:    JSON.stringify({ op_number: opNumber })
+      body:    JSON.stringify({ op_number: opNumber, project_number: _jobState.job_number })
     })
       .then(function (r) {
         if (!r.ok) throw new Error("HTTP " + r.status);
@@ -3274,14 +3352,41 @@ sap.ui.getCore().attachInit(function () {
       delete _opMetaMap[oldNum];
       delete _opTreeCache[oldNum];
       delete _itemsDetailsCache[oldNum];
+      // Rename oldNum → opNum in every item title BEFORE setSelectedKey triggers _loadTreeFromCache
+      (function _renameTitles(items) {
+        (items || []).forEach(function (item) {
+          if (item.title && String(item.title).indexOf(oldNum) !== -1) {
+            item.title = String(item.title).split(oldNum).join(opNum);
+          }
+          _renameTitles(item.sub_process_items);
+        });
+      }(_opTreeCache[opNum]));
       // Update dropdown item key + text
       var dropItem = oOpSelect.getItems().find(function (i) { return i.getKey() === oldNum; });
       if (dropItem) { dropItem.setKey(opNum); dropItem.setText(opNum); }
-      // If the renamed op was selected, switch selection to new key
+      // Switch selection to new key (programmatic — does not fire change event)
       if (oOpSelect.getSelectedKey() === oldNum) { oOpSelect.setSelectedKey(opNum); }
-      // Queue old op for deletion on next save
-      if (_opsToDelete.indexOf(oldNum) < 0) { _opsToDelete.push(oldNum); }
+      // Explicitly reload the tree so renamed titles appear immediately
+      if (oOpSelect.getSelectedKey() === opNum) { _loadTreeFromCache(opNum); }
       _opDialogOrigNum = opNum;
+      // Immediately tell the backend to delete the old op and save under the new number
+      var treeItems    = _opTreeCache[opNum] || [];
+      var detailsCache = _itemsDetailsCache[opNum] || {};
+      var renamePayload = {
+        op_number:               opNum,
+        cycle_general_structure: treeItems,
+        items_details:           Object.keys(detailsCache).map(function (k) { return detailsCache[k]; }),
+        job_metadata:            _buildJobMetadata(opNum, treeItems),
+        project_metadata:        _buildProjectMetadata(),
+        ops_to_delete:           [oldNum]
+      };
+      fetch(API_BASE + "/updateDB", {
+        method:  "POST",
+        headers: { "Content-Type": "application/json" },
+        body:    JSON.stringify(renamePayload)
+      })
+        .then(function (r) { console.log("[ValiantTMS] /updateDB renameOp:", r.status); })
+        .catch(function (err) { console.warn("[ValiantTMS] /updateDB renameOp error:", err.message); });
     }
 
     _opMetaMap[opNum] = {
@@ -3855,8 +3960,8 @@ sap.ui.getCore().attachInit(function () {
       new sap.ui.core.Item({ key: '',                    text: '—' }),
       new sap.ui.core.Item({ key: RC_COND.FROM_ZERO,    text: 'From Zero' }),
       new sap.ui.core.Item({ key: RC_COND.CUSTOM_VALUE, text: 'Custom value' }),
-      new sap.ui.core.Item({ key: RC_COND.AFTER,        text: 'After...' }),
-      new sap.ui.core.Item({ key: RC_COND.WITH,         text: 'With ...' }),
+      new sap.ui.core.Item({ key: RC_COND.AFTER,        text: 'After...  [Alt+S+A]' }),
+      new sap.ui.core.Item({ key: RC_COND.WITH,         text: 'With ...  [Alt+S+W]' }),
       new sap.ui.core.Item({ key: RC_COND.SEQUENTIAL,   text: 'Sequential' }),
       new sap.ui.core.Item({ key: RC_COND.SYNC_START,   text: 'Sync Start' })
     ],
@@ -3904,7 +4009,7 @@ sap.ui.getCore().attachInit(function () {
 
   // ─ Tab 1 · General Calculator ─────────────────────────────────────────────
   var oCalcOpLabel = new sap.m.Text({ text: '', wrapping: false }).addStyleClass('vtCalcOpLabel');
-  var oCalcDisplay = new sap.m.Input({ value: '0', textAlign: 'End', width: '100%' });
+  var oCalcDisplay = new sap.m.Input({ value: '0', textAlign: 'End', width: '220px' }).addStyleClass('vtCalcDisplayInput');
 
   var _calcInsert = function (ch) {
     var v = oCalcDisplay.getValue();
@@ -3934,13 +4039,13 @@ sap.ui.getCore().attachInit(function () {
   };
   var oCalcBtnBox = (function () {
     var ROWS = [['(',')', '⌫','/'],['7','8','9','*'],['4','5','6','-'],['1','2','3','+'],['0','.','C','=']];
-    var vb = new sap.m.VBox({ width: '100%' });
+    var vb = new sap.m.VBox({}).addStyleClass('vtCalcBtnWrapper');
     ROWS.forEach(function (row) {
-      var hb = new sap.m.HBox({ justifyContent: 'SpaceAround', width: '100%' });
+      var hb = new sap.m.HBox({ justifyContent: 'SpaceBetween', width: '220px' }).addStyleClass('vtCalcBtnRow');
       row.forEach(function (t) {
         hb.addItem(new sap.m.Button({
-          text: t, width: '58px',
-          type: t === '=' ? 'Emphasized' : '+-*/()'.indexOf(t) >= 0 ? 'Ghost' : 'Transparent',
+          text: t, width: '52px',
+          type: t === '=' ? 'Emphasized' : '+-*/()⌫'.indexOf(t) >= 0 ? 'Ghost' : 'Transparent',
           press: (function (ch) { return function () { _calcOnBtn(ch); }; })(t)
         }));
       });
@@ -3991,10 +4096,20 @@ sap.ui.getCore().attachInit(function () {
     var fs  = tpre+' + '+n+'('+tps+'+'+tpe+') + '+L+'/'+v+' + ('+n+'-1)'+tint+' + '+tpost;
     _calcResults.processing = _procPType.getSelectedKey()+': '+fs+' = '+total;
     oCalcProcFormula.setHtmlText(
-      '<p style="text-align:center;font-size:13px;color:#555"><em>T = t<sub>pre</sub> + N(t<sub>ps</sub>+t<sub>pe</sub>) + L/v + (N−1)t<sub>int</sub> + t<sub>post</sub></em></p>'+
-      '<hr style="border:0;border-top:1px solid #ddd">'+
-      '<p style="text-align:center;font-size:12px;color:#666">'+fs+'</p>'+
-      '<p style="text-align:center;font-size:15px;font-weight:bold;color:#0854a0">T = '+total+' s</p>'
+      '<p style="text-align:center;font-size:19px;color:#0854a0;margin-top:16px;margin-bottom:8px">'+
+        '<em>T</em><sub>total</sub> = '+
+        '<em>t</em><sub>pre</sub> + '+
+        '<em>N</em>(<em>t</em><sub>ps</sub> + <em>t</em><sub>pe</sub>) + '+
+        '<em>L</em>/<em>v</em> + '+
+        '(<em>N</em> − 1)<em>t</em><sub>inter</sub> + '+
+        '<em>t</em><sub>post</sub>'+
+      '</p>'+
+      '<p style="text-align:center;border-top:1px solid #999;padding-top:8px;font-size:16px;color:#444;margin-bottom:8px">'+
+        '<em>T</em><sub>total</sub> = '+fs+
+      '</p>'+
+      '<p style="text-align:center;font-weight:bold;font-size:20px;color:#0854a0;margin-top:4px">'+
+        '<em>T</em><sub>total</sub> = '+total+' s'+
+      '</p>'
     );
   };
 
@@ -4049,11 +4164,11 @@ sap.ui.getCore().attachInit(function () {
       var defs = groupData[catName];
       var numCtrl = new sap.m.StepInput({ value: 1, min: 0, max: 99, step: 1, width: '62px', change: function () { _updateMatrixResult(); } });
       var catObj  = { groupTitle: groupTitle, catName: catName, numCtrl: numCtrl, items: [] };
-      var itemsVBox = new sap.m.VBox({});
+      var itemsVBox = new sap.m.VBox({ width: '100%' });
       defs.forEach(function (def) {
         var qtyCtrl = new sap.m.StepInput({ value: 0, min: 0, max: 200, step: 1, width: '62px', change: function () { _updateMatrixResult(); } });
         catObj.items.push({ text: def[0], time: def[1], qtyCtrl: qtyCtrl });
-        itemsVBox.addItem(new sap.m.HBox({ alignItems: 'Center', renderType: 'Bare',
+        itemsVBox.addItem(new sap.m.HBox({ alignItems: 'Center', renderType: 'Bare', width: '100%',
           items: [
             new sap.m.Text({ text: def[0], wrapping: true }).addStyleClass('vtMxItemText'),
             new sap.m.Text({ text: def[1]+'s', textAlign: 'End' }).addStyleClass('vtMxTimeText'),
@@ -4062,7 +4177,7 @@ sap.ui.getCore().attachInit(function () {
         }).addStyleClass('vtMxItemRow'));
       });
       groupVBox.addItem(new sap.m.Panel({
-        expandable: true, expanded: false,
+        expandable: true, expanded: false, width: '100%',
         headerToolbar: new sap.m.Toolbar({ style: 'Clear', content: [
           new sap.m.Text({ text: catName }), new sap.m.ToolbarSpacer(),
           new sap.m.Label({ text: '×' }), numCtrl
@@ -4127,12 +4242,21 @@ sap.ui.getCore().attachInit(function () {
         ] }).addStyleClass('vtDialogForm') ]
       }),
       new sap.m.IconTabFilter({ key: 'matrix', text: 'Matrix',
-        content: [ new sap.m.VBox({ items: [
+        content: [ new sap.m.VBox({ width: '100%', items: [
           oMatrixDisplay,
-          new sap.m.HBox({ height: '340px', items: [
-            new sap.m.ScrollContainer({ height: '340px', vertical: true, width: '34%', content: [ _buildMatrixGroup('OPERATOR', _matrixData.OPERATOR) ] }),
-            new sap.m.ScrollContainer({ height: '340px', vertical: true, width: '33%', content: [ _buildMatrixGroup('MACHINE',  _matrixData.MACHINE)  ] }),
-            new sap.m.ScrollContainer({ height: '340px', vertical: true, width: '33%', content: [ _buildMatrixGroup('ROBOT',    _matrixData.ROBOT)    ] })
+          new sap.m.HBox({ width: '100%', items: [
+            new sap.m.VBox({ width: '300px', items: [
+              new sap.m.Label({ text: 'Operator' }).addStyleClass('vtMxColHeader'),
+              new sap.m.ScrollContainer({ height: '315px', vertical: true, width: '300px', content: [ _buildMatrixGroup('OPERATOR', _matrixData.OPERATOR) ] })
+            ]}),
+            new sap.m.VBox({ width: '300px', items: [
+              new sap.m.Label({ text: 'Machine' }).addStyleClass('vtMxColHeader'),
+              new sap.m.ScrollContainer({ height: '315px', vertical: true, width: '300px', content: [ _buildMatrixGroup('MACHINE',  _matrixData.MACHINE)  ] })
+            ]}),
+            new sap.m.VBox({ width: '300px', items: [
+              new sap.m.Label({ text: 'Robot' }).addStyleClass('vtMxColHeader'),
+              new sap.m.ScrollContainer({ height: '315px', vertical: true, width: '300px', content: [ _buildMatrixGroup('ROBOT',    _matrixData.ROBOT)    ] })
+            ]})
           ] })
         ] }) ]
       })
@@ -4242,11 +4366,11 @@ sap.ui.getCore().attachInit(function () {
 
   var oCycleCalcDialog = new sap.m.Dialog({
     title: 'Cycle Time Calculator',
-    contentWidth: '720px', contentHeight: '540px',
+    contentWidth: '900px', contentHeight: '540px',
     draggable: true, resizable: true,
     content: [ oCalcTabBar ],
     buttons: [
-      new sap.m.Button({ text: 'Save', type: 'Emphasized', press: function () { _saveCycleCalc(); } }),
+      new sap.m.Button({ text: 'OK', type: 'Emphasized', press: function () { _saveCycleCalc(); } }),
       new sap.m.Button({
         text: 'Save as Predefined', icon: 'sap-icon://bookmark',
         press: function () { oSavePredefNameInput.setValue(''); oSavePredefDialog.open(); }
@@ -4266,8 +4390,8 @@ sap.ui.getCore().attachInit(function () {
       new sap.ui.core.Item({ key: '',                    text: '—' }),
       new sap.ui.core.Item({ key: RC_COND.CUSTOM_VALUE, text: 'Custom value' }),
       new sap.ui.core.Item({ key: RC_COND.EQUAL_TO,     text: 'Equal to' }),
-      new sap.ui.core.Item({ key: RC_COND.CYCLE_CALC,  text: 'Cycle Time Calculator' }),
-      new sap.ui.core.Item({ key: RC_COND.PREDEFINED, text: 'Predefined'             })
+      new sap.ui.core.Item({ key: RC_COND.CYCLE_CALC,   text: 'Cycle Time Calculator' }),
+      new sap.ui.core.Item({ key: RC_COND.PREDEFINED,   text: 'Predefined' })
     ],
     change: function (oEvent) { onCycleConditionChanged(oEvent.getParameter('selectedItem').getKey()); }
   });
@@ -4337,9 +4461,10 @@ sap.ui.getCore().attachInit(function () {
       new sap.ui.core.Item({ key: '',                       text: '—' }),
       new sap.ui.core.Item({ key: RC_COND.LAST,            text: 'Last process' }),
       new sap.ui.core.Item({ key: RC_COND.CUSTOM_VALUE,    text: 'Custom value' }),
-      new sap.ui.core.Item({ key: RC_COND.BEFORE,          text: 'Before ...' }),
-      new sap.ui.core.Item({ key: RC_COND.WITH,            text: 'With ...' }),
-      new sap.ui.core.Item({ key: RC_COND.SYNC_COMPLETION, text: 'Sync Completion' })
+      new sap.ui.core.Item({ key: RC_COND.BEFORE,          text: 'Before ...  [Alt+E+B]' }),
+      new sap.ui.core.Item({ key: RC_COND.WITH,            text: 'With ...  [Alt+E+W]' }),
+      new sap.ui.core.Item({ key: RC_COND.SYNC_COMPLETION, text: 'Sync Completion' }),
+      new sap.ui.core.Item({ key: RC_COND.SEQUENTIAL,      text: 'Sequential' })
     ],
     change: function (oEvent) { onEndConditionChanged(oEvent.getParameter('selectedItem').getKey()); }
   });
@@ -4385,10 +4510,10 @@ sap.ui.getCore().attachInit(function () {
     content: [
       oRcStatusLabel,
       new sap.m.ToolbarSpacer(),
-      new sap.m.Button({ text: 'Apply', type: 'Emphasized', press: function () { commitRcWait(); } }),
+      new sap.m.Button({ text: 'Apply',  type: 'Transparent', press: function () { commitRcWait(); } }),
       new sap.m.Button({ text: 'Cancel', type: 'Transparent', press: function () { cancelRcWait(); } })
     ]
-  });
+  }).addStyleClass('vtRcWaitBar');
 
   // End phase is initially the derived phase — disable its controls at startup
   setPhaseControlsEnabled('end', false);
@@ -4491,13 +4616,19 @@ sap.ui.getCore().attachInit(function () {
                   else { sap.m.MessageToast.show("Select an item first."); }
                 }
               }),
-              new sap.m.Label({ text: 'More Spec' }).addStyleClass('vtAddRemoveLabel')
+              new sap.m.Label({ text: 'More Spec' }).addStyleClass('vtAddRemoveLabel'),
+              new sap.m.Button({
+                icon:    "sap-icon://simulate",
+                type:    "Default",
+                tooltip: "Open Cycle Time Calculator",
+                press: function () { openCycleCalcDialog(); }
+              }),
+              new sap.m.Label({ text: 'Calculator' }).addStyleClass('vtAddRemoveLabel')
             ]
           }).addStyleClass('vtRcAddRemoveBox'),
           new sap.m.HBox({ layoutData: new sap.m.FlexItemData({ growFactor: 1 }) }),
           oMiniPieWidget ]
-      }),
-      oRcStatusBar
+      })
     ]
   }).addStyleClass('vtRcToolbar sapUiSizeCompact');
 
@@ -4526,11 +4657,18 @@ sap.ui.getCore().attachInit(function () {
     ]
   }).addStyleClass('sapUiSizeCompact vtDesignStatusBar');
 
-  // ── Design Tab: job toolbar → RC toolbar → scale toolbar → table ────────────
+  // ── Design Tab: RC toolbar → scale toolbar → tree → status bar ──────────────
+  var oDesignInnerLayout = new sap.ui.layout.FixFlex({
+    vertical:    true,
+    fixFirst:    false,
+    fixContent:  [oRcStatusBar],
+    flexContent: oTable
+  });
+
   var oDesignLayout = new sap.ui.layout.FixFlex({
     vertical:    true,
     fixContent:  [oRcToolbar, oTreeDesignToolbar],
-    flexContent: oTable
+    flexContent: oDesignInnerLayout
   });
 
   // ── Plots / Chart.js ──────────────────────────────────────────────────────
@@ -4903,7 +5041,7 @@ sap.ui.getCore().attachInit(function () {
     return fetch(API_BASE + "/updateTree", {
       method:  "POST",
       headers: { "Content-Type": "application/json" },
-      body:    JSON.stringify({ op_number: opNumber })
+      body:    JSON.stringify({ op_number: opNumber, project_number: _jobState.job_number })
     })
     .then(function (r) {
       if (!r.ok) throw new Error("HTTP " + r.status);
@@ -5777,6 +5915,62 @@ sap.ui.getCore().attachInit(function () {
     var inInput = t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' ||
                         t.isContentEditable || t.closest('[contenteditable="true"]'));
     if (inInput) return;
+    // Disable all edit shortcuts on the Home tab (read-only view)
+    if (oIconTabBar && oIconTabBar.getSelectedKey() === 'home') return;
+
+    // ── Alt+S / Alt+E chord shortcuts for RC wait conditions ──────────────
+    if (e.altKey && (e.key === 's' || e.key === 'S')) {
+      e.preventDefault();
+      _rcShortcutPrefix = 'S';
+      clearTimeout(_rcShortcutTimer);
+      _rcShortcutTimer = setTimeout(function () { _rcShortcutPrefix = null; }, 1500);
+      return;
+    }
+    if (e.altKey && (e.key === 'e' || e.key === 'E')) {
+      e.preventDefault();
+      _rcShortcutPrefix = 'E';
+      clearTimeout(_rcShortcutTimer);
+      _rcShortcutTimer = setTimeout(function () { _rcShortcutPrefix = null; }, 1500);
+      return;
+    }
+    if (_rcShortcutPrefix) {
+      var _p = _rcShortcutPrefix;
+      _rcShortcutPrefix = null;
+      clearTimeout(_rcShortcutTimer);
+      if (_p === 'S' && (e.key === 'a' || e.key === 'A')) {
+        e.preventDefault();
+        oRcStartCheck.setSelected(true);  onPhaseCheckChanged('start', true);
+        oRcEndCheck.setSelected(false);   onPhaseCheckChanged('end',   false);
+        oRcStartSelect.setSelectedKey(RC_COND.AFTER);
+        onStartConditionChanged(RC_COND.AFTER);
+        return;
+      }
+      if (_p === 'S' && (e.key === 'w' || e.key === 'W')) {
+        e.preventDefault();
+        oRcStartCheck.setSelected(true);  onPhaseCheckChanged('start', true);
+        oRcEndCheck.setSelected(false);   onPhaseCheckChanged('end',   false);
+        oRcStartSelect.setSelectedKey(RC_COND.WITH);
+        onStartConditionChanged(RC_COND.WITH);
+        return;
+      }
+      if (_p === 'E' && (e.key === 'w' || e.key === 'W')) {
+        e.preventDefault();
+        oRcEndCheck.setSelected(true);   onPhaseCheckChanged('end',   true);
+        oRcStartCheck.setSelected(false); onPhaseCheckChanged('start', false);
+        oRcEndSelect.setSelectedKey(RC_COND.WITH);
+        onEndConditionChanged(RC_COND.WITH);
+        return;
+      }
+      if (_p === 'E' && (e.key === 'b' || e.key === 'B')) {
+        e.preventDefault();
+        oRcEndCheck.setSelected(true);   onPhaseCheckChanged('end',   true);
+        oRcStartCheck.setSelected(false); onPhaseCheckChanged('start', false);
+        oRcEndSelect.setSelectedKey(RC_COND.BEFORE);
+        onEndConditionChanged(RC_COND.BEFORE);
+        return;
+      }
+    }
+
     if (e.key === 'Delete') { e.preventDefault(); removeProcess(); return; }
     if (e.shiftKey && e.key === 'P') { e.preventDefault(); addNewProcess(); return; }
     var mod = e.ctrlKey || e.metaKey;
