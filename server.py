@@ -457,9 +457,7 @@ def api_tree():
 def api_update_db():
     data       = request.get_json() or {}
     import json as _json
-    print("[updateDB] payload keys:", list(data.keys()))
-    print("[updateDB] job_metadata:", _json.dumps(data.get("job_metadata"), indent=2))
-    print("[updateDB] items_details sample:", _json.dumps((data.get("items_details") or [])[:2], indent=2))
+    print("[updateDB] full payload:\n" + _json.dumps(data, indent=2))
     updated_db = data.get("cycle_general_structure", data.get("updated_db", []))
     op_number  = data.get("op_number", "")
 

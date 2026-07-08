@@ -92,9 +92,20 @@
     .vtProcFormulaBox { padding: 0 16px; border-left: 2px solid #b8d0f0; min-width: 280px; }
     .vtDialogForm.sapMVBox { gap: 3px !important; }
     .vtMatrixDisplay  { background: #f7f9fb; border: 1px solid #e0e0e0; border-radius: 4px; padding: 4px 8px; min-height: 44px; }
-    .vtMxColHeader.sapMLabel { display: block; text-align: center; font-size: 0.95rem; font-weight: bold; color: #0854a0; background: #eef4ff; border: 1px solid #b8d0f0; border-radius: 4px 4px 0 0; padding: 5px 0; width: 100%; }
+    .vtMxColHeader.sapMHBox { background: #eef4ff; border: 1px solid #b8d0f0; border-radius: 4px 4px 0 0; padding: 4px 8px; width: 100%; box-sizing: border-box; }
+    .vtMxColTitle.sapMLabel { font-size: 0.95rem; font-weight: bold !important; color: #0854a0 !important; }
+    .vtMxColMult.sapMLabel { margin: 0 4px; color: #555; }
+    .vtMxColSpaced.sapMVBox { margin-left: 14px; }
+    .vtMxGroupVBox { overflow: hidden !important; min-width: 0 !important; max-width: 100% !important; }
+    .vtMxGroupVBox .sapMPanel { overflow: hidden !important; min-width: 0 !important; max-width: 100% !important; box-sizing: border-box !important; }
+    .vtMxGroupVBox .sapMPanelHdr { max-width: 100% !important; overflow: hidden !important; box-sizing: border-box !important; }
+    .vtMxGroupVBox .sapMPanelContent { overflow: hidden !important; max-width: 100% !important; box-sizing: border-box !important; }
+    .vtMxGroupVBox .sapMTBActive { min-width: 0 !important; overflow: hidden !important; max-width: 100% !important; }
+    .vtMxGroupVBox .sapMTBActive .sapMText { overflow: hidden !important; text-overflow: ellipsis !important; white-space: nowrap !important; min-width: 0 !important; flex: 1 1 0 !important; }
+    .vtMxItemRow .sapMStepInput { flex: 0 0 62px !important; min-width: 0 !important; }
+    .vtMxItemRow > .vtMxTimeText { flex: 0 0 44px !important; }
     .vtMxItemRow { padding: 2px 0; border-bottom: 1px solid #f0f0f0; column-gap: 10px; }
-    .vtMxItemRow > .vtMxItemText { flex: 1 1 0 !important; min-width: 0 !important; font-size: 0.8rem !important; padding-right: 4px !important; }
+    .vtMxItemRow > .vtMxItemText { flex: 0 1 auto !important; min-width: 0 !important; font-size: 0.8rem !important; padding-right: 4px !important; }
     .vtMxItemRow > .vtMxTimeText { font-size: 0.8rem !important; color: #888 !important; width: 44px !important; flex-shrink: 0 !important; text-align: right !important; }
 
     /* Design status bar — sits below the table */
@@ -203,7 +214,8 @@ sap.ui.getCore().attachInit(function () {
   var nAutoExpandLevel     = 0;
   var nHomeAutoExpandLevel = 0;
 
-  var _opsToDelete = [];  // ops queued for deletion, flushed on saveToDb
+  var _opsToDelete    = [];   // ops queued for deletion, flushed on saveToDb
+  var _projectToDelete = []; // old job numbers when job # is renamed, sent once then cleared
 
   // In-memory metadata — no server calls until the Save button is pressed
   var _jobState = {
@@ -1687,31 +1699,46 @@ sap.ui.getCore().attachInit(function () {
   }
 
   function saveToDb() {
-    var items    = oDataModel.getProperty("/items");
-    var op       = oOpSelect.getSelectedKey();
-    var payload  = {
-      op_number:               op,
-      cycle_general_structure: stripClientFields(_tagOpNumber(items, op)),
-      items_details:           _buildItemsDetailsPayload(op, items),
-      job_metadata:            _buildJobMetadata(op, items),
-      project_metadata:        _buildProjectMetadata(),
-      ops_to_delete:           _opsToDelete.slice()
-    };
+    var currentOp    = oOpSelect.getSelectedKey();
+    var currentItems = oDataModel.getProperty("/items");
+    var projectMeta  = _buildProjectMetadata();
+    var opKeys       = Object.keys(_opTreeCache);
+    if (currentOp && opKeys.indexOf(currentOp) === -1) opKeys.push(currentOp);
+    if (!opKeys.length) { sap.m.MessageToast.show("Nothing to save"); return; }
 
-    console.log("[ValiantTMS] POST /updateDB payload:", JSON.parse(JSON.stringify(payload)));
+    var opsToDeleteSnap     = _opsToDelete.slice();
+    var projectToDeleteSnap = _projectToDelete.slice();
 
-    fetch(API_BASE + "/updateDB", {
-      method:  "POST",
-      headers: { "Content-Type": "application/json" },
-      body:    JSON.stringify(payload)
-    })
-      .then(function (r) {
-        if (!r.ok) return r.text().then(function (t) { console.error("[ValiantTMS] /updateDB error " + r.status + ":", t); });
-        console.log("[ValiantTMS] /updateDB:", r.status);
+    console.log("[ValiantTMS] _opTreeCache (full):", JSON.parse(JSON.stringify(_opTreeCache)));
+
+    opKeys.forEach(function (op, idx) {
+      var items   = (op === currentOp) ? currentItems : (_opTreeCache[op] || []);
+      var payload = {
+        op_number:               op,
+        cycle_general_structure: stripClientFields(_tagOpNumber(items, op)),
+        items_details:           _buildItemsDetailsPayload(op, items),
+        job_metadata:            _buildJobMetadata(op, items),
+        project_metadata:        projectMeta,
+        ops_to_delete:           idx === 0 ? opsToDeleteSnap     : [],
+        projects_to_delete:      idx === 0 ? projectToDeleteSnap : []
+      };
+
+      console.log("[ValiantTMS] POST /updateDB [" + op + "] payload:", JSON.parse(JSON.stringify(payload)));
+
+      fetch(API_BASE + "/updateDB", {
+        method:  "POST",
+        headers: { "Content-Type": "application/json" },
+        body:    JSON.stringify(payload)
       })
-      .catch(function (err) { console.warn("[ValiantTMS] /updateDB response error:", err.message); });
+        .then(function (r) {
+          if (!r.ok) return r.text().then(function (t) { console.error("[ValiantTMS] /updateDB [" + op + "] error " + r.status + ":", t); });
+          console.log("[ValiantTMS] /updateDB [" + op + "]:", r.status);
+        })
+        .catch(function (err) { console.warn("[ValiantTMS] /updateDB [" + op + "] error:", err.message); });
+    });
 
-    _opsToDelete = [];
+    _opsToDelete     = [];
+    _projectToDelete = [];
     sap.m.MessageToast.show("Saved");
   }
 
@@ -3751,14 +3778,45 @@ sap.ui.getCore().attachInit(function () {
       var prevJobNum = _jobState.job_number;
       if (prevJobNum && jobNum !== prevJobNum) {
         if (!window.confirm('Change job number from "' + prevJobNum + '" to "' + jobNum + '"?')) return;
-        // Rename the dropdown item and the map key
+
+        // Only queue the original old number — skip if a rename is already pending
+        if (_projectToDelete.length === 0) {
+          _projectToDelete.push(prevJobNum);
+        }
+
+        // Update dropdown and project op map
         _projectOpMap[jobNum] = _projectOpMap[prevJobNum] || [];
         delete _projectOpMap[prevJobNum];
-        var items = oJobSelect.getItems();
-        for (var i = 0; i < items.length; i++) {
-          if (items[i].getKey() === prevJobNum) { items[i].setKey(jobNum); items[i].setText(jobNum); break; }
+        var dropItems = oJobSelect.getItems();
+        for (var i = 0; i < dropItems.length; i++) {
+          if (dropItems[i].getKey() === prevJobNum) { dropItems[i].setKey(jobNum); dropItems[i].setText(jobNum); break; }
         }
         oJobSelect.setSelectedKey(jobNum);
+
+        // Update project_number in all caches
+        Object.keys(_opMetaMap).forEach(function (op) {
+          if ((_opMetaMap[op] || {}).project_number === prevJobNum) _opMetaMap[op].project_number = jobNum;
+        });
+        Object.keys(_itemsDetailsCache).forEach(function (op) {
+          Object.keys(_itemsDetailsCache[op] || {}).forEach(function (id) {
+            if ((_itemsDetailsCache[op][id] || {}).project_number === prevJobNum)
+              _itemsDetailsCache[op][id].project_number = jobNum;
+          });
+        });
+        (function _renameInTree(items) {
+          (items || []).forEach(function (item) {
+            if (item.project_number === prevJobNum) item.project_number = jobNum;
+            _renameInTree(item.sub_process_items);
+          });
+        }(Object.keys(_opTreeCache).reduce(function (all, op) { return all.concat(_opTreeCache[op] || []); }, [])));
+
+        // Also update live model items
+        (function _renameInModel(items) {
+          (items || []).forEach(function (item) {
+            if (item.project_number === prevJobNum) item.project_number = jobNum;
+            _renameInModel(item.sub_process_items);
+          });
+        }(oDataModel.getProperty('/items') || []));
       }
     }
 
@@ -3897,7 +3955,43 @@ sap.ui.getCore().attachInit(function () {
         icon:    "sap-icon://delete",
         type:    "Reject",
         tooltip: "Delete the selected job/project",
-        press: function () { sap.m.MessageToast.show("Delete Job: not yet implemented."); }
+        press: function () {
+          var jobNum = _jobState.job_number;
+          if (!jobNum) { sap.m.MessageToast.show("No job selected."); return; }
+          if (!window.confirm('Delete job "' + jobNum + '"? It will be removed from the database on next Save.')) return;
+
+          // Remove from dropdown
+          var dropItems = oJobSelect.getItems();
+          for (var i = 0; i < dropItems.length; i++) {
+            if (dropItems[i].getKey() === jobNum) { oJobSelect.removeItem(dropItems[i]); break; }
+          }
+          delete _projectOpMap[jobNum];
+
+          // Clear caches and state
+          _opTreeCache = {}; _opMetaMap = {}; _itemsDetailsCache = {}; _opsToDelete = [];
+          _jobState.job_number = ''; _jobState.job_title = ''; _jobState.job_description = '';
+          _jobState.target_cycle_time = ''; _jobState.machine_list = [];
+          _jobState.robot_list = []; _jobState.operator_list = []; _jobState.predefined_processes = [];
+
+          oDataModel.setData({ items: [], maxCycleEnd: 500 });
+          maxCycleEnd = 0; updateGanttColumn(); updateRuler(); setTimeout(_updateMiniPie, 0);
+
+          // Queue for deletion after all clearing is done
+          _projectToDelete.push(jobNum);
+
+          // Select next available job or clear op dropdown
+          var remaining = oJobSelect.getItems().filter(function (it) { return !!it.getKey(); });
+          if (remaining.length) {
+            oJobSelect.setSelectedKey(remaining[0].getKey());
+            oJobSelect.fireChange({ selectedItem: remaining[0] });
+          } else {
+            oJobSelect.setSelectedKey('');
+            oOpSelect.removeAllItems();
+            oOpSelect.addItem(new sap.ui.core.Item({ key: '', text: 'Select Op…' }));
+          }
+
+          sap.m.MessageToast.show('Job "' + jobNum + '" queued for deletion — click Save to confirm.');
+        }
       })
     ]
   }).addStyleClass("vtJobSection");
@@ -4159,7 +4253,7 @@ sap.ui.getCore().attachInit(function () {
   };
 
   var _buildMatrixGroup = function (groupTitle, groupData) {
-    var groupVBox = new sap.m.VBox({ width: '100%' });
+    var groupVBox = new sap.m.VBox({ width: '100%' }).addStyleClass('vtMxGroupVBox');
     Object.keys(groupData).forEach(function (catName) {
       var defs = groupData[catName];
       var numCtrl = new sap.m.StepInput({ value: 1, min: 0, max: 99, step: 1, width: '62px', change: function () { _updateMatrixResult(); } });
@@ -4179,8 +4273,7 @@ sap.ui.getCore().attachInit(function () {
       groupVBox.addItem(new sap.m.Panel({
         expandable: true, expanded: false, width: '100%',
         headerToolbar: new sap.m.Toolbar({ style: 'Clear', content: [
-          new sap.m.Text({ text: catName }), new sap.m.ToolbarSpacer(),
-          new sap.m.Label({ text: '×' }), numCtrl
+          new sap.m.Text({ text: catName })
         ]}),
         content: [ itemsVBox ]
       }));
@@ -4189,25 +4282,37 @@ sap.ui.getCore().attachInit(function () {
     return groupVBox;
   };
 
+  var _opNumCtrl   = new sap.m.StepInput({ value: 1, min: 0, max: 99, step: 1, width: '72px', change: function () { _updateMatrixResult(); } });
+  var _machNumCtrl = new sap.m.StepInput({ value: 1, min: 0, max: 99, step: 1, width: '72px', change: function () { _updateMatrixResult(); } });
+  var _robNumCtrl  = new sap.m.StepInput({ value: 1, min: 0, max: 99, step: 1, width: '72px', change: function () { _updateMatrixResult(); } });
+
   var _updateMatrixResult = function () {
-    var sum = 0, parts = [];
+    var colNums = { OPERATOR: +_opNumCtrl.getValue()||1, MACHINE: +_machNumCtrl.getValue()||1, ROBOT: +_robNumCtrl.getValue()||1 };
+    var sum = 0, catGroups = [];
     _matrixCatControls.forEach(function (cat) {
-      var num = +cat.numCtrl.getValue()||0;
+      var num = colNums[cat.groupTitle] || 1;
+      var activeItems = [];
       cat.items.forEach(function (it) {
-        var qty = +it.qtyCtrl.getValue()||0;
-        if (qty > 0 && num > 0) { sum += num*qty*it.time; parts.push(num+'×'+qty+'×'+it.text+'('+it.time+'s)'); }
+        var qty = +it.qtyCtrl.getValue() || 0;
+        if (qty > 0) {
+          sum += num * qty * it.time;
+          activeItems.push('<em>' + qty + ' × ' + it.text + ' (' + it.time + 's)</em>');
+        }
       });
+      if (activeItems.length) {
+        catGroups.push('<strong>' + cat.catName + '</strong>: ' + num + ' × [' + activeItems.join(' + ') + ']');
+      }
     });
-    if (!parts.length) {
+    if (!catGroups.length) {
       oMatrixDisplay.setHtmlText('<p style="color:#aaa;text-align:center;padding:8px">Select quantities above to calculate</p>');
       _calcResults.matrix = ''; return;
     }
-    var result  = Math.round(sum*100)/100;
-    var summary = parts.slice(0,4).join(' + ')+(parts.length>4?' + …':'');
-    _calcResults.matrix = summary+' = '+result;
+    var result  = Math.round(sum * 100) / 100;
+    var summary = catGroups.join(' + ');
+    _calcResults.matrix = summary + ' = ' + result;
     oMatrixDisplay.setHtmlText(
-      '<p style="font-size:11px;color:#555;padding:2px 4px">'+summary+'</p>'+
-      '<p style="text-align:center;font-size:15px;font-weight:bold;color:#0854a0;padding:2px">Cycle Time = '+result+' s</p>'
+      '<p style="font-size:12px;color:#444;padding:2px 4px">' + summary + '</p>' +
+      '<p style="text-align:center;font-size:15px;font-weight:bold;color:#0854a0;padding:4px 2px">Cycle Time = ' + result + ' s</p>'
     );
   };
 
@@ -4242,21 +4347,21 @@ sap.ui.getCore().attachInit(function () {
         ] }).addStyleClass('vtDialogForm') ]
       }),
       new sap.m.IconTabFilter({ key: 'matrix', text: 'Matrix',
-        content: [ new sap.m.VBox({ width: '100%', items: [
+        content: [ new sap.m.VBox({ width: '100%', height: '100%', items: [
           oMatrixDisplay,
-          new sap.m.HBox({ width: '100%', items: [
-            new sap.m.VBox({ width: '300px', items: [
-              new sap.m.Label({ text: 'Operator' }).addStyleClass('vtMxColHeader'),
-              new sap.m.ScrollContainer({ height: '315px', vertical: true, width: '300px', content: [ _buildMatrixGroup('OPERATOR', _matrixData.OPERATOR) ] })
-            ]}),
-            new sap.m.VBox({ width: '300px', items: [
-              new sap.m.Label({ text: 'Machine' }).addStyleClass('vtMxColHeader'),
-              new sap.m.ScrollContainer({ height: '315px', vertical: true, width: '300px', content: [ _buildMatrixGroup('MACHINE',  _matrixData.MACHINE)  ] })
-            ]}),
-            new sap.m.VBox({ width: '300px', items: [
-              new sap.m.Label({ text: 'Robot' }).addStyleClass('vtMxColHeader'),
-              new sap.m.ScrollContainer({ height: '315px', vertical: true, width: '300px', content: [ _buildMatrixGroup('ROBOT',    _matrixData.ROBOT)    ] })
-            ]})
+          new sap.m.HBox({ width: '100%', layoutData: new sap.m.FlexItemData({ growFactor: 1 }), items: [
+            new sap.m.VBox({ height: '100%', items: [
+              new sap.m.HBox({ alignItems: 'Center', items: [ new sap.m.Label({ text: 'Operator' }).addStyleClass('vtMxColTitle'), new sap.m.Label({ text: '×' }).addStyleClass('vtMxColMult'), _opNumCtrl ] }).addStyleClass('vtMxColHeader'),
+              new sap.m.ScrollContainer({ height: '100%', vertical: true, width: '100%', content: [ _buildMatrixGroup('OPERATOR', _matrixData.OPERATOR) ] })
+            ], layoutData: new sap.m.FlexItemData({ growFactor: 1, shrinkFactor: 1 }) }),
+            new sap.m.VBox({ height: '100%', items: [
+              new sap.m.HBox({ alignItems: 'Center', items: [ new sap.m.Label({ text: 'Machine' }).addStyleClass('vtMxColTitle'), new sap.m.Label({ text: '×' }).addStyleClass('vtMxColMult'), _machNumCtrl ] }).addStyleClass('vtMxColHeader'),
+              new sap.m.ScrollContainer({ height: '100%', vertical: true, width: '100%', content: [ _buildMatrixGroup('MACHINE',  _matrixData.MACHINE)  ] })
+            ], layoutData: new sap.m.FlexItemData({ growFactor: 1, shrinkFactor: 1 }) }).addStyleClass('vtMxColSpaced'),
+            new sap.m.VBox({ height: '100%', items: [
+              new sap.m.HBox({ alignItems: 'Center', items: [ new sap.m.Label({ text: 'Robot' }).addStyleClass('vtMxColTitle'), new sap.m.Label({ text: '×' }).addStyleClass('vtMxColMult'), _robNumCtrl ] }).addStyleClass('vtMxColHeader'),
+              new sap.m.ScrollContainer({ height: '100%', vertical: true, width: '100%', content: [ _buildMatrixGroup('ROBOT',    _matrixData.ROBOT)    ] })
+            ], layoutData: new sap.m.FlexItemData({ growFactor: 1, shrinkFactor: 1 }) }).addStyleClass('vtMxColSpaced')
           ] })
         ] }) ]
       })
@@ -4266,18 +4371,32 @@ sap.ui.getCore().attachInit(function () {
   // ─ Open / Save ────────────────────────────────────────────────────────────
   function openCycleCalcDialog() {
     _calcResults = { general: '', processing: '', travel: '', matrix: '' };
-    var item = getCurrentItem();
-    if (item) {
-      var rc = parseRC(item.run_cond_config);
-      if (rc.cycle && rc.cycle.condition === RC_COND.CYCLE_CALC && rc.cycle.values.length) {
-        oCalcOpLabel.setText(rc.cycle.values[0]);
-        _calcResults.general = rc.cycle.values[0];
-      }
-    }
+
+    // Tab 1 — General
+    oCalcDisplay.setValue('0');
+    oCalcOpLabel.setText('');
+
+    // Tab 2 — Processing
+    _procPType.setSelectedKey('Welding');
+    _procTps.setValue(0.9); _procTpe.setValue(0.9); _procV.setValue(10);
+    _procTpre.setValue(2);  _procTint.setValue(1);  _procTpost.setValue(2);
+    _procN.setValue(1);
     _rebuildProcLengths();
     _updateProcResult();
+
+    // Tab 3 — Travel
+    oCalcDistInput.setValue(150);
+    oCalcSpeedInput.setValue(10);
     _updateTravelResult();
+
+    // Tab 4 — Matrix
+    _opNumCtrl.setValue(1); _machNumCtrl.setValue(1); _robNumCtrl.setValue(1);
+    _matrixCatControls.forEach(function (cat) {
+      cat.numCtrl.setValue(1);
+      cat.items.forEach(function (it) { it.qtyCtrl.setValue(0); });
+    });
     _updateMatrixResult();
+
     oCycleCalcDialog.open();
   }
 
