@@ -406,7 +406,10 @@ sap.ui.getCore().attachInit(function () {
         item.run_cond_config = serializeRC(rc);
       }
       if (!item.step || item.step[0] !== 'S') {
-        item.cycle_type = 'Undefined';
+        // Keep an explicitly assigned leaf cycle type when the tree is
+        // recalculated; only unclassified leaves should return to Undefined.
+        var leafTypes = ['Machine cycle', 'Robot cycle', 'Manual cycle', 'Operator wait'];
+        if (leafTypes.indexOf(item.cycle_type) < 0) item.cycle_type = 'Undefined';
       }
     }
   }
@@ -909,6 +912,7 @@ sap.ui.getCore().attachInit(function () {
 
     applyRowHighlight();
     _showRcSigns(oObj);
+    _syncCycleTypeSelect();
     console.log("[ValiantTMS] active items:", oRcState.activeItemIds);
     console.log("[ValiantTMS] item data:", JSON.stringify(oObj, null, 2));
     console.log("[ValiantTMS] RC JSON:", oObj.run_cond_config || '(none)');
@@ -1386,6 +1390,116 @@ sap.ui.getCore().attachInit(function () {
     sap.m.MessageToast.show("Pasted " + freshClones.length + " item(s)");
   }
 
+  function _syncTreeStructure(items) {
+    (items || []).forEach(function (item, index) {
+      item.tree_index = index;
+      item.subprocess = (item.sub_process_items || []).map(function (child) { return child.item_id; }).join(',');
+      _syncTreeStructure(item.sub_process_items || []);
+    });
+  }
+
+  function _repairMovedSiblings(items, siblings, startIndex, count) {
+    var flatMap = buildFlatMap(items, {});
+    for (var i = startIndex; i < startIndex + count; i++) {
+      if (siblings[i]) organizeRcAfterChange(items, flatMap, siblings[i], false, true);
+    }
+    // Reconnect the first item after the moved block to its new predecessor.
+    var next = siblings[startIndex + count];
+    if (next) organizeRcAfterChange(items, buildFlatMap(items, {}), next, false, true);
+  }
+
+  function _getLevelMoveSelection() {
+    if (!oRcState.activeItemIds.length) {
+      sap.m.MessageToast.show('Select one or more processes first.');
+      return null;
+    }
+    var items = oDataModel.getProperty('/items');
+    var flatMap = buildFlatMap(items, {});
+    var selected = oRcState.activeItemIds.map(function (id) { return flatMap[id]; }).filter(Boolean);
+    if (!selected.length) return null;
+
+    var parentId = selected[0].parent_id || '';
+    if (!selected.every(function (item) { return (item.parent_id || '') === parentId; })) {
+      sap.m.MessageToast.show('Level changes require items from the same parent.');
+      return null;
+    }
+
+    var siblings = parentId ? (flatMap[parentId] || {}).sub_process_items : items;
+    if (!Array.isArray(siblings)) return null;
+    selected.sort(function (a, b) { return siblings.indexOf(a) - siblings.indexOf(b); });
+    return { items: items, flatMap: flatMap, parentId: parentId, siblings: siblings, selected: selected };
+  }
+
+  function levelUpSelected() {
+    var move = _getLevelMoveSelection();
+    if (!move) return;
+    if (!move.parentId) {
+      sap.m.MessageToast.show('Top-level stations cannot be moved up.');
+      return;
+    }
+    if (!window.confirm('Do you want to move the selected process(es) to an upper level?')) return;
+
+    var parent = move.flatMap[move.parentId];
+    if (!parent) return;
+    var destinationParentId = parent.parent_id || '';
+    var destination = destinationParentId
+      ? (move.flatMap[destinationParentId] || {}).sub_process_items
+      : move.items;
+    if (!Array.isArray(destination)) return;
+    var sourceFirstIndex = move.siblings.indexOf(move.selected[0]);
+
+    move.selected.forEach(function (item) {
+      move.siblings.splice(move.siblings.indexOf(item), 1);
+      item.parent_id = destinationParentId;
+    });
+    var insertAt = destination.indexOf(parent) + 1;
+    destination.splice.apply(destination, [insertAt, 0].concat(move.selected));
+
+    _repairMovedSiblings(move.items, move.siblings, Math.max(0, sourceFirstIndex - 1), 0);
+    _repairMovedSiblings(move.items, destination, insertAt, move.selected.length);
+    _syncTreeStructure(move.items);
+    oSelectedItemId = move.selected[move.selected.length - 1].item_id;
+    oRcState.activeItemIds = move.selected.map(function (item) { return item.item_id; });
+    nAutoExpandLevel = 5; nHomeAutoExpandLevel = 5;
+    recalcTree();
+    applyRowHighlight();
+    sap.m.MessageToast.show('Moved ' + move.selected.length + ' process' + (move.selected.length === 1 ? '' : 'es') + ' up one level.');
+  }
+
+  function levelDownSelected() {
+    var move = _getLevelMoveSelection();
+    if (!move) return;
+    var firstIndex = move.siblings.indexOf(move.selected[0]);
+    if (firstIndex <= 0) {
+      sap.m.MessageToast.show('The first item at a level cannot be moved down.');
+      return;
+    }
+    var newParent = move.siblings[firstIndex - 1];
+    if (!newParent || move.selected.indexOf(newParent) >= 0) {
+      sap.m.MessageToast.show('Select items below an unselected preceding item to move them down.');
+      return;
+    }
+    if (!window.confirm('Do you want to move the selected process(es) to a lower level?')) return;
+
+    var destination = newParent.sub_process_items || (newParent.sub_process_items = []);
+    var insertAt = destination.length;
+    move.selected.forEach(function (item) {
+      move.siblings.splice(move.siblings.indexOf(item), 1);
+      item.parent_id = newParent.item_id;
+    });
+    destination.push.apply(destination, move.selected);
+
+    _repairMovedSiblings(move.items, move.siblings, Math.max(0, firstIndex - 1), 0);
+    _repairMovedSiblings(move.items, destination, insertAt, move.selected.length);
+    _syncTreeStructure(move.items);
+    oSelectedItemId = move.selected[move.selected.length - 1].item_id;
+    oRcState.activeItemIds = move.selected.map(function (item) { return item.item_id; });
+    nAutoExpandLevel = 5; nHomeAutoExpandLevel = 5;
+    recalcTree();
+    applyRowHighlight();
+    sap.m.MessageToast.show('Moved ' + move.selected.length + ' process' + (move.selected.length === 1 ? '' : 'es') + ' down one level.');
+  }
+
   function removeItemFromTree(items, itemId) {
     for (var i = 0; i < items.length; i++) {
       if (items[i].item_id === itemId) {
@@ -1704,7 +1818,9 @@ sap.ui.getCore().attachInit(function () {
     var projectMeta  = _buildProjectMetadata();
     var opKeys       = Object.keys(_opTreeCache);
     if (currentOp && opKeys.indexOf(currentOp) === -1) opKeys.push(currentOp);
-    if (!opKeys.length) { sap.m.MessageToast.show("Nothing to save"); return; }
+    // Always submit the save request.  FastAPI needs to receive project metadata,
+    // deletions, and an intentionally empty tree just as it does a populated tree.
+    if (!opKeys.length) opKeys.push(currentOp || "");
 
     var opsToDeleteSnap     = _opsToDelete.slice();
     var projectToDeleteSnap = _projectToDelete.slice();
@@ -1759,6 +1875,52 @@ sap.ui.getCore().attachInit(function () {
     'Operator wait': '#1EC2EB'
   };
 
+  var oCycleTypeSelect;
+
+  function _syncCycleTypeSelect() {
+    if (!oCycleTypeSelect) return;
+    var flatMap = buildFlatMap(oDataModel.getProperty('/items'), {});
+    var selectedTypes = oRcState.activeItemIds.map(function (id) {
+      var item = flatMap[id];
+      return item && (!item.sub_process_items || !item.sub_process_items.length) ? item.cycle_type : null;
+    }).filter(Boolean);
+    var uniqueTypes = selectedTypes.filter(function (type, index, all) { return all.indexOf(type) === index; });
+    oCycleTypeSelect.setSelectedKey(uniqueTypes.length === 1 ? uniqueTypes[0] : '');
+  }
+
+  function applyCycleTypeToSelected(cycleType) {
+    if (!cycleType) return;
+    if (!oRcState.activeItemIds.length) {
+      sap.m.MessageToast.show('Select one or more leaf items first.');
+      oCycleTypeSelect.setSelectedKey('');
+      return;
+    }
+
+    var flatMap = buildFlatMap(oDataModel.getProperty('/items'), {});
+    var changed = 0;
+    oRcState.activeItemIds.forEach(function (id) {
+      var item = flatMap[id];
+      if (!item || (item.sub_process_items && item.sub_process_items.length) || !item.cycle_time) return;
+      item.cycle_type = cycleType;
+      item.color = _CYCLE_TYPE_COLORS[cycleType] || item.color;
+      changed++;
+    });
+
+    if (!changed) {
+      sap.m.MessageToast.show('Cycle type can only be applied to leaf items with a cycle time.');
+      _syncCycleTypeSelect();
+      return;
+    }
+
+    // Cycle timing is unchanged, so refresh the model and cached payload without
+    // running the structural recalculation that changes parent/child semantics.
+    oDataModel.refresh(true);
+    _cacheCurrentOp();
+    _updateMiniPie();
+    _tryRefreshReport();
+    sap.m.MessageToast.show('Cycle type updated for ' + changed + ' item' + (changed === 1 ? '' : 's') + '. Click Save to persist.');
+  }
+
   function _updateResourceUsageInCache(opNumber) {
     var items = oDataModel.getProperty('/items');
     if (!items || !items.length) return;
@@ -1793,14 +1955,18 @@ sap.ui.getCore().attachInit(function () {
             else if (operatorSet[resKey]) { cycleType = 'Operator wait'; }
             if (cycleType) {
               var resolvedType = (cycleType === 'Operator wait') ? 'Manual cycle' : cycleType;
-              item.color      = _CYCLE_TYPE_COLORS[resolvedType] || item.color;
-              item.cycle_type = resolvedType;
+              // Explicit types selected in the Design tab take precedence over
+              // resource-based inference. Unclassified leaves can still infer it.
+              if (!item.cycle_type || item.cycle_type === 'Undefined') {
+                item.color      = _CYCLE_TYPE_COLORS[resolvedType] || item.color;
+                item.cycle_type = resolvedType;
+              }
               var ct = item.cycle_time || 0;
               resourceUsage[inner] = (resourceUsage[inner] || 0) + ct;
               found = true;
             }
           }
-          if (!found && item.cycle_type !== 'Station' && item.cycle_type !== 'Process group') {
+          if (!found && (!item.cycle_type || item.cycle_type === 'Undefined')) {
             item.cycle_type = 'Undefined';
             item.color      = '#09528A';
           }
@@ -4684,6 +4850,10 @@ sap.ui.getCore().attachInit(function () {
           new sap.m.Button({ icon: "sap-icon://scissors", type: "Default", tooltip: "Cut selected item(s) (Ctrl+X)",   press: function () { cutToClipboard(); } })
         ]}).addStyleClass('vtCPSection'),
         new sap.m.VBox({ justifyContent: 'Center', alignItems: 'Center', items: [
+          new sap.m.Button({ text: 'Level Up',   type: 'Default', tooltip: 'Move selected sibling processes to the parent level', press: function () { levelUpSelected(); } }),
+          new sap.m.Button({ text: 'Level Down', type: 'Default', tooltip: 'Move selected sibling processes under the preceding process', press: function () { levelDownSelected(); } })
+        ]}).addStyleClass('vtCPSection'),
+        new sap.m.VBox({ justifyContent: 'Center', alignItems: 'Center', items: [
           new sap.m.Button({ icon: "sap-icon://org-chart",             type: "Default", tooltip: "Paste as subprocess of selected row (Ctrl+V)", press: function () { pasteFromClipboard('subprocess'); } }),
           new sap.m.Button({ icon: "sap-icon://navigation-up-arrow",   type: "Default", tooltip: "Paste clipboard above selected row",           press: function () { pasteFromClipboard('above'); } }),
           new sap.m.Button({ icon: "sap-icon://navigation-down-arrow", type: "Default", tooltip: "Paste clipboard below selected row",           press: function () { pasteFromClipboard('below'); } })
@@ -4742,7 +4912,20 @@ sap.ui.getCore().attachInit(function () {
                 tooltip: "Open Cycle Time Calculator",
                 press: function () { openCycleCalcDialog(); }
               }),
-              new sap.m.Label({ text: 'Calculator' }).addStyleClass('vtAddRemoveLabel')
+              new sap.m.Label({ text: 'Calculator' }).addStyleClass('vtAddRemoveLabel'),
+              oCycleTypeSelect = new sap.m.Select({
+                width: '148px',
+                tooltip: 'Apply a cycle type to selected leaf items',
+                items: [
+                  new sap.ui.core.Item({ key: '',               text: 'Cycle type…' }),
+                  new sap.ui.core.Item({ key: 'Machine cycle',  text: 'Machine cycle' }),
+                  new sap.ui.core.Item({ key: 'Robot cycle',    text: 'Robot cycle' }),
+                  new sap.ui.core.Item({ key: 'Manual cycle',   text: 'Manual cycle' }),
+                  new sap.ui.core.Item({ key: 'Operator wait',  text: 'Operator wait' })
+                ],
+                change: function (oEvent) { applyCycleTypeToSelected(oEvent.getSource().getSelectedKey()); }
+              }),
+              new sap.m.Label({ text: 'Cycle Type' }).addStyleClass('vtAddRemoveLabel')
             ]
           }).addStyleClass('vtRcAddRemoveBox'),
           new sap.m.HBox({ layoutData: new sap.m.FlexItemData({ growFactor: 1 }) }),
