@@ -57,6 +57,11 @@
     .vtCopyPastePanel .sapMHBox { margin-bottom: 0 !important; gap: 0 !important; }
     .vtCPSection { padding: 4px 6px; display: flex !important; flex-direction: column !important; justify-content: center !important; align-items: center !important; gap: 2px; }
     .vtCPSection + .vtCPSection { border-left: 1px solid #e0e0e0; }
+    /* Extra tools panel — 2-column grid of icon/label cells */
+    .vtExtraToolsPanel .sapMPanelContent { padding: 4px 6px !important; }
+    .vtExtraToolsGrid.sapMFlexBox { display: grid !important; grid-template-columns: repeat(2, auto) !important; grid-auto-rows: auto; gap: 2px 10px; }
+    .vtExtraToolsCell { grid-column: auto; }
+    .vtExtraToolsCell.vtSpanAll { grid-column: 1 / -1; }
     /* Add/Delete Process wrapper — panel grows to fill the height set by the outer stretch */
     .vtRcAddRemoveBox { display: flex !important; flex-direction: column !important; align-items: center !important; }
     .vtRcAddRemoveBox > .sapMPanel { flex: 1 !important; }
@@ -1259,6 +1264,7 @@ sap.ui.getCore().attachInit(function () {
         if (upd) refreshRcToolbar(upd);
       }
     } else {
+      if (!oActivePhases.includes(phase)) return;
       if (oActivePhases.length <= 1) {
         sap.m.MessageToast.show("At least 1 phase must remain active");
         getPhaseCheckbox(phase).setSelected(true);
@@ -1767,6 +1773,16 @@ sap.ui.getCore().attachInit(function () {
       if (found) return found;
     }
     return null;
+  }
+
+  // Blank out the DB primary key ("id") from raw general_structure_table rows so
+  // its stale value never gets echoed back on save, while keeping the key present.
+  function _stripDbId(items) {
+    (items || []).forEach(function (item) {
+      item.id = '';
+      _stripDbId(item.sub_process_items);
+    });
+    return items;
   }
 
   // Strip client-side-only annotations before sending to the API.
@@ -3320,6 +3336,7 @@ sap.ui.getCore().attachInit(function () {
       .then(function (response) {
         var responseData    = response.data || {};
         var items           = (responseData.cycle_general_structure) || responseData || [];
+        _stripDbId(items);
         var opMetaRows      = responseData.op_metadata   || [];
         var itemsDetailRows = responseData.items_details || [];
 
@@ -3381,7 +3398,7 @@ sap.ui.getCore().attachInit(function () {
   }
 
   function _populateOpSelect(jobKey) {
-    var ops = _projectOpMap[jobKey] || [];
+    var ops = (_projectOpMap[jobKey] || []).filter(function (op) { return !!(op && String(op).trim()); });
     _suppressOpChange = true;
     oOpSelect.removeAllItems();
     oOpSelect.addItem(new sap.ui.core.Item({ key: "", text: "Select op…" }));
@@ -3402,7 +3419,7 @@ sap.ui.getCore().attachInit(function () {
       .then(function (r) { return r.json(); })
       .then(function (response) {
         var d        = response.data || {};
-        var projNums = Object.keys(d);
+        var projNums = Object.keys(d).filter(function (pn) { return !!(pn && pn.trim()); });
 
         _projectOpMap   = {};
         _projectMetaMap = {};
@@ -4210,10 +4227,22 @@ sap.ui.getCore().attachInit(function () {
           if (!op) { sap.m.MessageToast.show("Select an Op first."); return; }
           if (!window.confirm('Are you sure you want to delete Op "' + op + '"?\nThis cannot be undone.')) return;
           _opsToDelete.push(op);
+          delete _opTreeCache[op];
+          delete _opMetaMap[op];
+          delete _itemsDetailsCache[op];
           var allItems = oOpSelect.getItems();
           for (var k = 0; k < allItems.length; k++) {
             if (allItems[k].getKey() === op) { oOpSelect.removeItem(allItems[k]); break; }
           }
+          // Clear the selection and the live tree view so saveToDb() can't
+          // fall back to the deleted op's stale data via getSelectedKey()/oDataModel.
+          oOpSelect.setSelectedKey("");
+          oDataModel.setData({ items: [], maxCycleEnd: 500 });
+          maxCycleEnd = 0;
+          updateGanttColumn();
+          updateRuler();
+          setTimeout(_updateMiniPie, 0);
+          if (oIconTabBar && oIconTabBar.getSelectedKey() === 'stats') { _renderStatsTab(); }
           sap.m.MessageToast.show('Op "' + op + '" marked for deletion. Save to apply.');
         }
       }),
@@ -4897,6 +4926,79 @@ sap.ui.getCore().attachInit(function () {
     ]
   }).addStyleClass('vtRcAddRemoveBox');
 
+  // ── Extra tools panel — 2-column grid, lives to the right of Copy/Move ────
+  var oExtraToolsPanel = new sap.m.Panel({
+    expandable: false, backgroundDesign: 'Transparent',
+    content: [ new sap.m.FlexBox({
+      wrap: 'Wrap',
+      items: [
+        new sap.m.VBox({ alignItems: 'Center', items: [
+          new sap.m.Button({
+            icon:    "sap-icon://detail-view",
+            type:    "Default",
+            tooltip: "Open More Spec for selected item",
+            press: function () {
+              var item = getCurrentItem();
+              if (item) { _openMoreSpecDialog(item); }
+              else { sap.m.MessageToast.show("Select an item first."); }
+            }
+          }),
+          new sap.m.Label({ text: 'More Spec' }).addStyleClass('vtAddRemoveLabel')
+        ]}).addStyleClass('vtExtraToolsCell'),
+        new sap.m.VBox({ alignItems: 'Center', items: [
+          new sap.m.Button({
+            icon:    "sap-icon://palette",
+            type:    "Default",
+            tooltip: "Set highlight color for selected item(s)",
+            press:   function () { openHighlightColorPicker(); }
+          }),
+          new sap.m.Label({ text: 'Highlight' }).addStyleClass('vtAddRemoveLabel')
+        ]}).addStyleClass('vtExtraToolsCell'),
+        new sap.m.VBox({ alignItems: 'Center', items: [
+          new sap.m.Button({
+            icon:    "sap-icon://eraser",
+            type:    "Default",
+            tooltip: "Clear highlight color for selected item(s)",
+            press:   function () { clearItemHighlight(); }
+          }),
+          new sap.m.Label({ text: 'Clear H.' }).addStyleClass('vtAddRemoveLabel')
+        ]}).addStyleClass('vtExtraToolsCell'),
+        new sap.m.VBox({ alignItems: 'Center', items: [
+          new sap.m.Button({
+            icon:    "sap-icon://simulate",
+            type:    "Default",
+            tooltip: "Open Cycle Time Calculator",
+            press: function () { openCycleCalcDialog(); }
+          }),
+          new sap.m.Label({ text: 'Calculator' }).addStyleClass('vtAddRemoveLabel')
+        ]}).addStyleClass('vtExtraToolsCell'),
+        new sap.m.VBox({ alignItems: 'Center', items: [
+          oCycleTypeSelect = new sap.m.Select({
+            width: '148px',
+            tooltip: 'Apply a cycle type to selected leaf items',
+            items: [
+              new sap.ui.core.Item({ key: '',               text: 'Cycle type…' }),
+              new sap.ui.core.Item({ key: 'Machine cycle',  text: 'Machine cycle' }),
+              new sap.ui.core.Item({ key: 'Robot cycle',    text: 'Robot cycle' }),
+              new sap.ui.core.Item({ key: 'Manual cycle',   text: 'Manual cycle' }),
+              new sap.ui.core.Item({ key: 'Operator wait',  text: 'Operator wait' })
+            ],
+            change: function (oEvent) { applyCycleTypeToSelected(oEvent.getSource().getSelectedKey()); }
+          }),
+          new sap.m.Label({ text: 'Cycle Type' }).addStyleClass('vtAddRemoveLabel')
+        ]}).addStyleClass('vtExtraToolsCell vtSpanAll')
+      ]
+    }).addStyleClass('vtExtraToolsGrid') ]
+  }).addStyleClass('vtRcPanel vtRcAddRemovePanel vtExtraToolsPanel sapUiSizeCompact');
+
+  var oExtraToolsBox = new sap.m.VBox({
+    alignItems: 'Center',
+    items: [
+      oExtraToolsPanel,
+      new sap.m.Label({ text: 'Tools' }).addStyleClass('vtAddRemoveLabel')
+    ]
+  }).addStyleClass('vtRcAddRemoveBox');
+
   var oMiniPieWidget = new sap.ui.core.HTML({
     sanitizeContent: false,
     preferDOM: true,
@@ -4915,57 +5017,7 @@ sap.ui.getCore().attachInit(function () {
     width: '100%',
     items: [
       new sap.m.FlexBox({ wrap: 'Wrap', alignItems: 'Stretch', width: '100%',
-        items: [ oAddRemoveBox, oRcPhasesBox, oCopyPasteBox,
-          new sap.m.VBox({
-            alignItems: 'Center',
-            items: [
-              new sap.m.Button({
-                icon:    "sap-icon://detail-view",
-                type:    "Default",
-                tooltip: "Open More Spec for selected item",
-                press: function () {
-                  var item = getCurrentItem();
-                  if (item) { _openMoreSpecDialog(item); }
-                  else { sap.m.MessageToast.show("Select an item first."); }
-                }
-              }),
-              new sap.m.Label({ text: 'More Spec' }).addStyleClass('vtAddRemoveLabel'),
-              new sap.m.Button({
-                icon:    "sap-icon://palette",
-                type:    "Default",
-                tooltip: "Set highlight color for selected item(s)",
-                press:   function () { openHighlightColorPicker(); }
-              }),
-              new sap.m.Label({ text: 'Highlight' }).addStyleClass('vtAddRemoveLabel'),
-              new sap.m.Button({
-                icon:    "sap-icon://eraser",
-                type:    "Default",
-                tooltip: "Clear highlight color for selected item(s)",
-                press:   function () { clearItemHighlight(); }
-              }),
-              new sap.m.Label({ text: 'Clear H.' }).addStyleClass('vtAddRemoveLabel'),
-              new sap.m.Button({
-                icon:    "sap-icon://simulate",
-                type:    "Default",
-                tooltip: "Open Cycle Time Calculator",
-                press: function () { openCycleCalcDialog(); }
-              }),
-              new sap.m.Label({ text: 'Calculator' }).addStyleClass('vtAddRemoveLabel'),
-              oCycleTypeSelect = new sap.m.Select({
-                width: '148px',
-                tooltip: 'Apply a cycle type to selected leaf items',
-                items: [
-                  new sap.ui.core.Item({ key: '',               text: 'Cycle type…' }),
-                  new sap.ui.core.Item({ key: 'Machine cycle',  text: 'Machine cycle' }),
-                  new sap.ui.core.Item({ key: 'Robot cycle',    text: 'Robot cycle' }),
-                  new sap.ui.core.Item({ key: 'Manual cycle',   text: 'Manual cycle' }),
-                  new sap.ui.core.Item({ key: 'Operator wait',  text: 'Operator wait' })
-                ],
-                change: function (oEvent) { applyCycleTypeToSelected(oEvent.getSource().getSelectedKey()); }
-              }),
-              new sap.m.Label({ text: 'Cycle Type' }).addStyleClass('vtAddRemoveLabel')
-            ]
-          }).addStyleClass('vtRcAddRemoveBox'),
+        items: [ oAddRemoveBox, oRcPhasesBox, oCopyPasteBox, oExtraToolsBox,
           new sap.m.HBox({ layoutData: new sap.m.FlexItemData({ growFactor: 1 }) }),
           oMiniPieWidget ]
       })
@@ -5390,6 +5442,7 @@ sap.ui.getCore().attachInit(function () {
     .then(function (response) {
       var d = response.data || {};
       var items = d.cycle_general_structure || d || [];
+      _stripDbId(items);
       // Op-specific data only — job data stays as loaded from /updateProjectNumbers
       (d.op_metadata || []).forEach(function (row) {
         if (row.op_number) {
@@ -5556,6 +5609,7 @@ sap.ui.getCore().attachInit(function () {
           : { Start: { 'First Station': [],     Offset: [0.0] } };
 
         curSt = {
+          id:               '',
           item_id:          stId,
           parent_id:        '',
           title:            title,
@@ -5591,6 +5645,7 @@ sap.ui.getCore().attachInit(function () {
         }
 
         curSt.sub_process_items.push({
+          id:               '',
           item_id:          pid,
           parent_id:        curSt.item_id,
           title:            title,
