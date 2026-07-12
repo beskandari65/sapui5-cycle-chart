@@ -170,6 +170,10 @@
     .vtBarDim { opacity: 0.3; transition: opacity 0.15s; }
     .vtMiniPieWrap { display:flex; flex-direction:column; align-items:center; justify-content:center; gap:2px; padding:4px 10px; height:100%; }
     .vtMiniPieInfo { font-size:0.72rem; font-family:72,Arial,sans-serif; color:#32363a; text-align:center; line-height:1.4; }
+    .vtHomeMiniPieWrap { display:flex; flex-direction:row; align-items:center; justify-content:center; gap:8px; padding:4px 10px; height:100%; }
+    .vtHomeMiniPieInfo { font-size:0.72rem; font-family:72,Arial,sans-serif; color:#32363a; text-align:left; line-height:1.4; }
+    .vtHomeMiniPieInfo span:last-child { font-weight:bold; }
+    .vtPieInfo { font-size:0.75rem; font-family:72,Arial,sans-serif; color:#32363a; font-weight:600; text-align:center; margin-top:4px; }
     .vtPlotsGrid { display:flex; flex-wrap:wrap; gap:8px; padding:8px; align-content:flex-start; }
     .vtPlotCard { background:#fff; border:1px solid #e4e4e4; border-radius:6px; padding:10px 12px; min-width:0; }
     .vtCardSm   { flex:0 0 210px; }
@@ -3168,8 +3172,11 @@ sap.ui.getCore().attachInit(function () {
     var opMeta    = _opMetaMap[op] || {};
     var projNo    = _jobState.job_number        || '';
     var projTitle = _jobState.job_title         || '';
-    var opTitle   = opMeta.op_title             || '';
-    var targetCT  = _jobState.target_cycle_time || '';
+    var opTitle    = opMeta.op_title || '';
+    var numOfParts = opMeta.num_of_parts || 1;
+    var targetCT   = (op && _jobState.target_cycle_time)
+      ? Math.round(_jobState.target_cycle_time * numOfParts * 100) / 100
+      : '';
     var _actualMax = getMaxCycleEnd(oDataModel.getProperty('/items') || []);
     var usedCT     = (op && _actualMax) ? _actualMax.toFixed(2) : '';
 
@@ -3185,16 +3192,24 @@ sap.ui.getCore().attachInit(function () {
 
     return [
       '<div style="font-family:\'Segoe UI\',\'Helvetica Neue\',Arial,sans-serif;margin:0;padding:0;color:' + tc + ';">',
-      '  <div style="border-bottom:2px solid ' + tc + ';padding:6px 14px;">',
-      '    <div style="margin:0;font-size:22px;font-weight:bold;letter-spacing:0.5px;line-height:1.2;">',
-      '      ' + projLink + (projTitle ? '&nbsp;&mdash;&nbsp;' + projTitle : ''),
-      '    </div>',
-      '    <div style="margin:2px 0 0 0;font-size:15px;line-height:1.2;">',
-      '      ' + opLink + opBlock,
-      '    </div>',
-      '    <div style="margin-top:4px;font-size:14px;">',
-      '      <span>Target Cycle Time:</span>' + (targetCT ? ' <b>' + targetCT + 's</b>' : ' <em>&mdash;</em>') +
+      '  <div style="border-bottom:2px solid ' + tc + ';padding:6px 14px;display:flex;align-items:stretch;">',
+      '    <div style="flex:1;min-width:0;">',
+      '      <div style="margin:0;font-size:22px;font-weight:bold;letter-spacing:0.5px;line-height:1.2;">',
+      '        ' + projLink + (projTitle ? '&nbsp;&mdash;&nbsp;' + projTitle : ''),
+      '      </div>',
+      '      <div style="margin:2px 0 0 0;font-size:15px;line-height:1.2;">',
+      '        ' + opLink + opBlock,
+      '      </div>',
+      '      <div style="margin-top:4px;font-size:14px;">',
+      '        <span>Target Cycle Time:</span>' + (targetCT ? ' <b>' + targetCT + 's</b>' : ' <em>&mdash;</em>') +
       '&nbsp;&nbsp;<span>Calculated Cycle Time:</span>' + (usedCT ? ' <b>' + usedCT + 's</b>' : ' <em>&mdash;</em>'),
+      '      </div>',
+      '    </div>',
+      '    <div class="vtHomeMiniPieWrap">',
+      '      <div style="position:relative;width:70px;height:70px;flex-shrink:0;">',
+      '        <canvas id="vtHomeMiniPieCanvas"></canvas>',
+      '      </div>',
+      '      <div id="vtHomeMiniPieInfo" class="vtHomeMiniPieInfo">&mdash;</div>',
       '    </div>',
       '  </div>',
       '</div>'
@@ -3210,6 +3225,8 @@ sap.ui.getCore().attachInit(function () {
     } else {
       oHomeHeaderHtml.setContent(newHtml);
     }
+    // The canvas above was just (re)created — (re)draw the pie onto it.
+    setTimeout(_updateMiniPie, 0);
   }
 
   // ── Home scale toolbar (above the tree) ──────────────────────────────────
@@ -3337,7 +3354,7 @@ sap.ui.getCore().attachInit(function () {
         var responseData    = response.data || {};
         var items           = (responseData.cycle_general_structure) || responseData || [];
         _stripDbId(items);
-        var opMetaRows      = responseData.op_metadata   || [];
+        var opMetaRows      = responseData.job_metadata  || [];
         var itemsDetailRows = responseData.items_details || [];
 
         // Op-specific metadata only — job data stays as loaded from /updateProjectNumbers
@@ -3346,7 +3363,7 @@ sap.ui.getCore().attachInit(function () {
             _opMetaMap[row.op_number] = {
               op_title:       row.op_title        || '',
               op_description: row.job_description || '',
-              num_of_parts:   row.num_of_parts    || 1
+              num_of_parts:   row.num_of_parts     || 1
             };
           }
         });
@@ -3651,6 +3668,7 @@ sap.ui.getCore().attachInit(function () {
         .catch(function (err) { console.warn("[ValiantTMS] /updateDB createOp error:", err.message); });
     }
     oOpDialog.close();
+    if (oOpSelect.getSelectedKey() === opNum) { setTimeout(_updateMiniPie, 0); }
     sap.m.MessageToast.show(_opDialogMode === "add" ? "Op '" + opNum + "' created." : "Op saved.");
   }
 
@@ -4971,22 +4989,7 @@ sap.ui.getCore().attachInit(function () {
             press: function () { openCycleCalcDialog(); }
           }),
           new sap.m.Label({ text: 'Calculator' }).addStyleClass('vtAddRemoveLabel')
-        ]}).addStyleClass('vtExtraToolsCell'),
-        new sap.m.VBox({ alignItems: 'Center', items: [
-          oCycleTypeSelect = new sap.m.Select({
-            width: '148px',
-            tooltip: 'Apply a cycle type to selected leaf items',
-            items: [
-              new sap.ui.core.Item({ key: '',               text: 'Cycle type…' }),
-              new sap.ui.core.Item({ key: 'Machine cycle',  text: 'Machine cycle' }),
-              new sap.ui.core.Item({ key: 'Robot cycle',    text: 'Robot cycle' }),
-              new sap.ui.core.Item({ key: 'Manual cycle',   text: 'Manual cycle' }),
-              new sap.ui.core.Item({ key: 'Operator wait',  text: 'Operator wait' })
-            ],
-            change: function (oEvent) { applyCycleTypeToSelected(oEvent.getSource().getSelectedKey()); }
-          }),
-          new sap.m.Label({ text: 'Cycle Type' }).addStyleClass('vtAddRemoveLabel')
-        ]}).addStyleClass('vtExtraToolsCell vtSpanAll')
+        ]}).addStyleClass('vtExtraToolsCell')
       ]
     }).addStyleClass('vtExtraToolsGrid') ]
   }).addStyleClass('vtRcPanel vtRcAddRemovePanel vtExtraToolsPanel sapUiSizeCompact');
@@ -4996,6 +4999,36 @@ sap.ui.getCore().attachInit(function () {
     items: [
       oExtraToolsPanel,
       new sap.m.Label({ text: 'Tools' }).addStyleClass('vtAddRemoveLabel')
+    ]
+  }).addStyleClass('vtRcAddRemoveBox');
+
+  // ── Cycle Type panel — lives to the right of the Tools container ─────────
+  var oCycleTypePanel = new sap.m.Panel({
+    expandable: false, backgroundDesign: 'Transparent',
+    content: [ new sap.m.VBox({
+      alignItems: 'Center',
+      items: [
+        oCycleTypeSelect = new sap.m.Select({
+          width: '148px',
+          tooltip: 'Apply a cycle type to selected leaf items',
+          items: [
+            new sap.ui.core.Item({ key: '',               text: 'Cycle type…' }),
+            new sap.ui.core.Item({ key: 'Machine cycle',  text: 'Machine cycle' }),
+            new sap.ui.core.Item({ key: 'Robot cycle',    text: 'Robot cycle' }),
+            new sap.ui.core.Item({ key: 'Manual cycle',   text: 'Manual cycle' }),
+            new sap.ui.core.Item({ key: 'Operator wait',  text: 'Operator wait' })
+          ],
+          change: function (oEvent) { applyCycleTypeToSelected(oEvent.getSource().getSelectedKey()); }
+        })
+      ]
+    }) ]
+  }).addStyleClass('vtRcPanel vtRcAddRemovePanel sapUiSizeCompact');
+
+  var oCycleTypeBox = new sap.m.VBox({
+    alignItems: 'Center',
+    items: [
+      oCycleTypePanel,
+      new sap.m.Label({ text: 'Cycle Type' }).addStyleClass('vtAddRemoveLabel')
     ]
   }).addStyleClass('vtRcAddRemoveBox');
 
@@ -5017,7 +5050,7 @@ sap.ui.getCore().attachInit(function () {
     width: '100%',
     items: [
       new sap.m.FlexBox({ wrap: 'Wrap', alignItems: 'Stretch', width: '100%',
-        items: [ oAddRemoveBox, oRcPhasesBox, oCopyPasteBox, oExtraToolsBox,
+        items: [ oAddRemoveBox, oRcPhasesBox, oCopyPasteBox, oExtraToolsBox, oCycleTypeBox,
           new sap.m.HBox({ layoutData: new sap.m.FlexItemData({ growFactor: 1 }) }),
           oMiniPieWidget ]
       })
@@ -5089,6 +5122,30 @@ sap.ui.getCore().attachInit(function () {
     }
   });
 
+  // Draws the "Target" reference line across the full chart width (edge to
+  // edge), instead of only between the first/last category tick centers —
+  // a category-bound line dataset stops short of the chart's right edge.
+  Chart.register({
+    id: 'vtTargetLine',
+    afterDatasetsDraw: function (chart) {
+      var opt = chart.options.plugins && chart.options.plugins.vtTargetLine;
+      if (!opt || !opt.value) return;
+      var yScale = chart.scales.y;
+      var area   = chart.chartArea;
+      var yPix   = yScale.getPixelForValue(opt.value);
+      var ctx    = chart.ctx;
+      ctx.save();
+      ctx.setLineDash([5, 4]);
+      ctx.strokeStyle = opt.color || '#cc0000';
+      ctx.lineWidth   = 1.5;
+      ctx.beginPath();
+      ctx.moveTo(area.left, yPix);
+      ctx.lineTo(area.right, yPix);
+      ctx.stroke();
+      ctx.restore();
+    }
+  });
+
   function _destroyChart(id) {
     if (_chartInstances[id]) { _chartInstances[id].destroy(); delete _chartInstances[id]; }
   }
@@ -5147,7 +5204,7 @@ sap.ui.getCore().attachInit(function () {
     };
   }
 
-  function _renderPieChart(canvasId, usedTime, totalTarget, numOfParts) {
+  function _renderPieChart(canvasId, usedTime, totalTarget, numOfParts, infoId) {
     _destroyChart(canvasId);
     var ctx = document.getElementById(canvasId);
     if (!ctx) return;
@@ -5178,13 +5235,20 @@ sap.ui.getCore().attachInit(function () {
         }
       }
     });
+    if (infoId) {
+      var infoEl = document.getElementById(infoId);
+      if (infoEl) {
+        var pct = totalTarget > 0 ? Math.round(usedTime / totalTarget * 100) : 0;
+        infoEl.textContent = (Math.round(usedTime * 100) / 100) + 's / ' + (Math.round(totalTarget * 100) / 100) + 's (' + pct + '%)';
+      }
+    }
   }
 
-  function _updateMiniPie() {
-    var canvas = document.getElementById('vtMiniPieCanvas');
+  // Draw one used/target donut into canvasId, keyed under chartKey in
+  // _chartInstances, with the "X% / usedS / targetS" text into infoId.
+  function _renderMiniPieInto(chartKey, canvasId, infoId, target, used) {
+    var canvas = document.getElementById(canvasId);
     if (!canvas) return;
-    var target    = _jobState.target_cycle_time || 0;
-    var used      = Math.round((maxCycleEnd || 0) * 100) / 100;
     var remaining = Math.round((target - used) * 100) / 100;
     var labels, data, colors;
     if (remaining < 0) {
@@ -5192,8 +5256,8 @@ sap.ui.getCore().attachInit(function () {
     } else {
       labels = ['Used', 'Remaining']; data = [used, remaining || 0.01]; colors = ['#09528A', '#e8e8e8'];
     }
-    _destroyChart('vtMiniPie');
-    _chartInstances['vtMiniPie'] = new Chart(canvas, {
+    _destroyChart(chartKey);
+    _chartInstances[chartKey] = new Chart(canvas, {
       type: 'pie',
       data: { labels: labels, datasets: [{ data: data, backgroundColor: colors, borderWidth: 1, borderColor: '#fff' }] },
       options: {
@@ -5206,7 +5270,7 @@ sap.ui.getCore().attachInit(function () {
         }
       }
     });
-    var infoEl = document.getElementById('vtMiniPieInfo');
+    var infoEl = document.getElementById(infoId);
     if (infoEl) {
       var pct   = target > 0 ? Math.round(used / target * 100) : 0;
       var color = remaining < 0 ? '#cc0000' : (pct > 85 ? '#e07000' : '#09528A');
@@ -5214,6 +5278,28 @@ sap.ui.getCore().attachInit(function () {
         '<span style="font-size:1.05rem;font-weight:bold;color:' + color + '">' + pct + '%</span><br>' +
         '<span style="color:#666;font-size:0.7rem;">' + used + 's / ' + target + 's</span>';
     }
+  }
+
+  // Destroy any existing chart on canvasId and blank its info text — used
+  // when there's no op selected, so no value/plot is shown at all.
+  function _clearMiniPie(chartKey, canvasId, infoId) {
+    _destroyChart(chartKey);
+    var infoEl = document.getElementById(infoId);
+    if (infoEl) { infoEl.textContent = '—'; }
+  }
+
+  function _updateMiniPie() {
+    var opNumber = oOpSelect.getSelectedKey();
+    if (!opNumber) {
+      _clearMiniPie('vtMiniPie',     'vtMiniPieCanvas',     'vtMiniPieInfo');
+      _clearMiniPie('vtHomeMiniPie', 'vtHomeMiniPieCanvas', 'vtHomeMiniPieInfo');
+      return;
+    }
+    var numOfParts = (_opMetaMap[opNumber] || {}).num_of_parts || 1;
+    var target     = (_jobState.target_cycle_time || 0) * numOfParts;
+    var used       = Math.round((maxCycleEnd || 0) * 100) / 100;
+    _renderMiniPieInto('vtMiniPie',     'vtMiniPieCanvas',     'vtMiniPieInfo',     target, used);
+    _renderMiniPieInto('vtHomeMiniPie', 'vtHomeMiniPieCanvas', 'vtHomeMiniPieInfo', target, used);
   }
 
   function _renderBarChart(canvasId, categories, values, limitValue) {
@@ -5225,9 +5311,12 @@ sap.ui.getCore().attachInit(function () {
       borderRadius: 3, label: 'Time (s)'
     }];
     if (limitValue && limitValue > 0) {
+      // Legend swatch only — the actual reference line is drawn full-width
+      // (edge to edge) by the vtTargetLine plugin below, since a data-bound
+      // line dataset would stop short at the last category's tick center.
       datasets.push({
         type: 'line',
-        data: categories.map(function () { return limitValue; }),
+        data: categories.map(function () { return null; }),
         borderColor: '#cc0000', borderWidth: 1.5,
         borderDash: [5, 4], pointRadius: 0, fill: false,
         label: 'Target (' + limitValue + 's)', tension: 0
@@ -5240,6 +5329,7 @@ sap.ui.getCore().attachInit(function () {
         maintainAspectRatio: false,
         layout: { padding: { top: 20 } },
         plugins: {
+          vtTargetLine: (limitValue > 0) ? { value: limitValue, color: '#cc0000' } : null,
           legend: { display: !!limitValue, labels: { font: { family: '72,Arial,sans-serif', size: 11 } } },
           tooltip: { callbacks: { label: function (c) { return c.dataset.label + ': ' + c.parsed.y + 's'; } } }
         },
@@ -5255,15 +5345,15 @@ sap.ui.getCore().attachInit(function () {
     idSuffix = idSuffix || '';
     var opMaxEnd    = getMaxCycleEnd(items);
     var totalTarget = target * numOfParts;
-    _renderPieChart('vtOpPieCanvas' + idSuffix, opMaxEnd, totalTarget, numOfParts);
+    _renderPieChart('vtOpPieCanvas' + idSuffix, opMaxEnd, totalTarget, numOfParts, 'vtOpPieInfo' + idSuffix);
     var sums   = _computeCycleTypeSums(items);
     var ctCats = ['Machine cycle', 'Manual cycle', 'Robot cycle', 'Operator wait'];
     var ctVals = ctCats.map(function (k) { return Math.round(sums[k] * 100) / 100; });
-    _renderBarChart('vtOpCTCanvas' + idSuffix, ctCats, ctVals, target);
+    _renderBarChart('vtOpCTCanvas' + idSuffix, ctCats, ctVals, totalTarget);
     var summaryJson = (_opMetaMap[opNumber] || {}).machine_cycle_time_summary;
     var usageObj    = summaryJson ? JSON.parse(summaryJson) : _extractLeafResourceUsage(items);
     var rc = _sortedResourceChart(usageObj);
-    _renderBarChart('vtOpResCanvas' + idSuffix, rc.cats, rc.vals, target);
+    _renderBarChart('vtOpResCanvas' + idSuffix, rc.cats, rc.vals, totalTarget);
   }
 
   function _renderStationCharts(station, stIdSafe, numOfParts, target) {
@@ -5272,14 +5362,14 @@ sap.ui.getCore().attachInit(function () {
     var resId = 'vtSt_' + stIdSafe + '_res';
     var used        = station.cycle_time || 0;
     var totalTarget = target * numOfParts;
-    _renderPieChart(pieId, used, totalTarget, numOfParts);
+    _renderPieChart(pieId, used, totalTarget, numOfParts, 'vtSt_' + stIdSafe + '_pieInfo');
     var children = station.sub_process_items || [];
     var sums   = _computeCycleTypeSums(children);
     var ctCats = ['Machine cycle', 'Manual cycle', 'Robot cycle', 'Operator wait'];
     var ctVals = ctCats.map(function (k) { return Math.round(sums[k] * 100) / 100; });
-    _renderBarChart(ctId, ctCats, ctVals, target);
+    _renderBarChart(ctId, ctCats, ctVals, totalTarget);
     var rc = _sortedResourceChart(_extractLeafResourceUsage(children));
-    _renderBarChart(resId, rc.cats, rc.vals, target);
+    _renderBarChart(resId, rc.cats, rc.vals, totalTarget);
   }
 
   function _renderStationPlots(items, numOfParts, target, opSuffix) {
@@ -5319,6 +5409,7 @@ sap.ui.getCore().attachInit(function () {
           '<div class="vtPlotCard vtCardSm">' +
             '<div class="vtPlotTitle">' + stLabel + ' Cycle Time</div>' +
             '<div style="position:relative;height:190px;"><canvas id="vtSt_' + fullId + '_pie"></canvas></div>' +
+            '<div id="vtSt_' + fullId + '_pieInfo" class="vtPieInfo"></div>' +
           '</div>' +
           '<div class="vtPlotCard vtCardMd">' +
             '<div class="vtPlotTitle">' + stLabel + ' Cycle Type</div>' +
@@ -5339,7 +5430,12 @@ sap.ui.getCore().attachInit(function () {
   function _renderJobPlots() {
     var allOps    = oOpSelect.getItems().map(function (i) { return i.getKey(); }).filter(Boolean);
     var cached    = allOps.filter(function (op) { return !!_opTreeCache[op]; });
-    var target    = _jobState.target_cycle_time || 0;
+    // Job-level charts show one flat target line across all ops, so use the
+    // currently selected op's num_of_parts multiplier (same convention as the
+    // Design-tab pie widget).
+    var curOp      = oOpSelect.getSelectedKey();
+    var numOfParts = (_opMetaMap[curOp] || {}).num_of_parts || 1;
+    var target    = (_jobState.target_cycle_time || 0) * numOfParts;
     var noteEl    = document.getElementById('vtJobPlotsNote');
     if (noteEl) {
       noteEl.textContent = cached.length < allOps.length
@@ -5444,12 +5540,12 @@ sap.ui.getCore().attachInit(function () {
       var items = d.cycle_general_structure || d || [];
       _stripDbId(items);
       // Op-specific data only — job data stays as loaded from /updateProjectNumbers
-      (d.op_metadata || []).forEach(function (row) {
+      (d.job_metadata || []).forEach(function (row) {
         if (row.op_number) {
           _opMetaMap[row.op_number] = {
             op_title:       row.op_title        || '',
             op_description: row.job_description || '',
-            num_of_parts:   row.num_of_parts    || 1
+            num_of_parts:   row.num_of_parts     || 1
           };
         }
       });
@@ -6089,7 +6185,8 @@ sap.ui.getCore().attachInit(function () {
         bodyHtml =
           '<div class="vtPlotsGrid">' +
             '<div class="vtPlotCard vtCardSm"><div class="vtPlotTitle">Cycle Time</div>' +
-              '<div style="position:relative;height:180px;"><canvas id="vtOpPieCanvas_' + opSafe + '"></canvas></div></div>' +
+              '<div style="position:relative;height:180px;"><canvas id="vtOpPieCanvas_' + opSafe + '"></canvas></div>' +
+              '<div id="vtOpPieInfo_' + opSafe + '" class="vtPieInfo"></div></div>' +
             '<div class="vtPlotCard vtCardMd"><div class="vtPlotTitle">Cycle Type Summary</div>' +
               '<div style="position:relative;height:180px;"><canvas id="vtOpCTCanvas_' + opSafe + '"></canvas></div></div>' +
             '<div class="vtPlotCard vtCardLg"><div class="vtPlotTitle">Resource Usage</div>' +
