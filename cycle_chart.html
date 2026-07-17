@@ -823,6 +823,8 @@ sap.ui.getCore().attachInit(function () {
   var _pendingItemDeletes = {};  // opNumber → item_ids to delete on Save
   var _restoringHistory = false;
   var _historyLimit = 75;
+  var _jobMetadataDirty = false;
+  var _moreSpecDirty = false;
 
   function _cloneHistoryValue(value) { return JSON.parse(JSON.stringify(value)); }
   function _currentOpHistory() {
@@ -882,6 +884,17 @@ sap.ui.getCore().attachInit(function () {
   function _resetOpHistory(op) {
     if (op) _opHistory[op] = { undo: [], redo: [] };
     _updateHistoryButtons();
+  }
+
+  function _hasUnsavedChanges() {
+    if (_jobMetadataDirty || _moreSpecDirty || _opsToDelete.length || _projectToDelete.length) return true;
+    if (Object.keys(_pendingItemDeletes).some(function (op) {
+      return (_pendingItemDeletes[op] || []).length > 0;
+    })) return true;
+    return Object.keys(_opHistory).some(function (op) {
+      var history = _opHistory[op];
+      return history && (history.undo.length > 0 || history.redo.length > 0);
+    });
   }
   var oLastAddedItemId = null;   // item_id created by the most recent add — cleared on any manual click
 
@@ -2059,6 +2072,8 @@ sap.ui.getCore().attachInit(function () {
     Promise.all(saveRequests).then(function () {
       _opsToDelete     = [];
       _projectToDelete = [];
+      _jobMetadataDirty = false;
+      _moreSpecDirty = false;
       opKeys.forEach(function (op) {
         _pendingItemDeletes[op] = [];
         _resetOpHistory(op);
@@ -4222,6 +4237,7 @@ sap.ui.getCore().attachInit(function () {
       }
     }
 
+    _jobMetadataDirty = true;
     _jobState.job_number        = jobNum;
     _jobState.job_title         = oJobTitleInput.getValue().trim();
     _jobState.job_description   = oJobDescInput.getValue().trim();
@@ -4304,6 +4320,14 @@ sap.ui.getCore().attachInit(function () {
       // in-memory caches. Confirm first and restore the dropdown on Cancel.
       var previousJob = _jobState.job_number;
       if (previousJob && key !== previousJob) {
+        if (_hasUnsavedChanges()) {
+          oJobSelect.setSelectedKey(previousJob);
+          sap.m.MessageBox.warning(
+            'Please save your current changes before changing the Job #.',
+            { title: 'Unsaved changes' }
+          );
+          return;
+        }
         if (!window.confirm('Switch from job "' + previousJob + '" to job "' + key + '"?')) {
           oJobSelect.setSelectedKey(previousJob);
           return;
@@ -6169,6 +6193,7 @@ sap.ui.getCore().attachInit(function () {
     var cache = _itemsDetailsCache[op] || (_itemsDetailsCache[op] = {});
     if (!cache[itemId]) cache[itemId] = {};
     Object.assign(cache[itemId], fields);
+    _moreSpecDirty = true;
   }
 
   function _msDebounce(fn, ms) {
