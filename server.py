@@ -551,6 +551,14 @@ def api_update_db():
             OP_NUMBERS.discard(deleted_op)
             OP_METADATA.pop(deleted_op, None)
         for deleted_project in projects_to_delete:
+            # items_details does not store project_number. Remove linked detail
+            # rows before deleting their source rows from the main table.
+            cur.execute(
+                f"DELETE FROM items_details "
+                f"WHERE item_id IN (SELECT item_id FROM {TABLE_NAME} WHERE project_number = ?) "
+                f"OR op_number IN (SELECT DISTINCT op_number FROM {TABLE_NAME} WHERE project_number = ?)",
+                (deleted_project, deleted_project),
+            )
             cur.execute(f"DELETE FROM {TABLE_NAME} WHERE project_number = ?", (deleted_project,))
             cur.execute("DELETE FROM project_metadata WHERE project_no = ?", (deleted_project,))
 
