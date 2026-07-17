@@ -4274,6 +4274,17 @@ sap.ui.getCore().attachInit(function () {
       var key = oEvent.getParameter("selectedItem") && oEvent.getParameter("selectedItem").getKey();
       if (!key) return;
 
+      // Switching jobs replaces the visible tree and clears this job's
+      // in-memory caches. Confirm first and restore the dropdown on Cancel.
+      var previousJob = _jobState.job_number;
+      if (previousJob && key !== previousJob) {
+        if (!window.confirm('Switch from job "' + previousJob + '" to job "' + key + '"?')) {
+          oJobSelect.setSelectedKey(previousJob);
+          return;
+        }
+      }
+      if (key === previousJob) return;
+
       _jobState.job_number           = key;
       _jobState.job_title            = '';
       _jobState.job_description      = '';
