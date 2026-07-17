@@ -229,7 +229,9 @@ sap.ui.getCore().attachInit(function () {
   "use strict";
 
   // ── State ─────────────────────────────────────────────────────────────────
-  var API_BASE    = "http://localhost:8000";  // FastAPI server base URL
+  // Serve the UI and API from the same Flask server (normally port 5000).
+  // A relative URL avoids sending requests to the old, separate port 8000.
+  var API_BASE    = "";
 
   var scaleFactor = 2.0;   // pixels per second
   var maxCycleEnd = 500;   // updated after each API call
